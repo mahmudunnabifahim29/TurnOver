@@ -8,5 +8,5 @@ export const metadata: Metadata = {
 };
 
 export default function ModerationPage() {
-  return <AdminWorkspace initialTab="ads" workspacePath="/moderation" />;
+  return <AdminWorkspace initialTab="ads" requiredRole="moderator" workspacePath="/moderation" />;
 }

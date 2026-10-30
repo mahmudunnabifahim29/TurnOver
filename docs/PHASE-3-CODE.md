@@ -268,7 +268,7 @@ export const metadata: Metadata = {
 };
 
 export default function AdminPage() {
-  return <AdminWorkspace />;
+  return <AdminWorkspace requiredRole="admin" />;
 }
 ```
 
@@ -291,10 +291,13 @@ type Tab = "overview" | "ads" | "products" | "categories" | "issues" | "reports"
 type AdRow = {
   id: string;
   title: string;
+  description?: string;
   status: string;
   price: number;
   condition: string;
   created_at: string;
+  photos?: { storage_path: string; position: number }[] | null;
+  photoUrl?: string | null;
   category: { name_en: string }[] | null;
   location: { name_en: string }[] | null;
   seller: { display_name: string }[] | null;
@@ -375,12 +378,20 @@ function StatCard({ label, value, note }: { label: string; value: number; note: 
   );
 }
 
-export default function AdminWorkspace() {
+export default function AdminWorkspace({
+  initialTab = "overview",
+  workspacePath = "/admin",
+  requiredRole = "admin",
+}: {
+  initialTab?: Tab;
+  workspacePath?: string;
+  requiredRole?: Role;
+}) {
   const router = useRouter();
   const firebaseConfigured = isFirebaseConfigured();
   const [user, setUser] = useState<User | null>(null);
   const [role, setRole] = useState<Role | null>(null);
-  const [tab, setTab] = useState<Tab>("overview");
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [ads, setAds] = useState<AdRow[]>([]);
   const [products, setProducts] = useState<AdRow[]>([]);
   const [categories, setCategories] = useState<CategoryRow[]>([]);
@@ -390,6 +401,7 @@ export default function AdminWorkspace() {
   const [counts, setCounts] = useState<Counts>({ pendingAds: 0, activeAds: 0, openIssues: 0, openReports: 0 });
   const [connectedAt, setConnectedAt] = useState("");
   const [loading, setLoading] = useState(true);
+  const [accessDenied, setAccessDenied] = useState(false);
   const [busyId, setBusyId] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -399,7 +411,7 @@ export default function AdminWorkspace() {
     const supabase = createClient();
     const [adsResult, issuesResult, pendingCount, activeCount, issueCount] = await Promise.all([
       supabase.from("ads")
-        .select("id,title,status,price,condition,created_at,category:categories(name_en),location:locations(name_en),seller:profiles(display_name)")
+        .select("id,title,description,status,price,condition,created_at,category:categories(name_en),location:locations(name_en),seller:profiles(display_name),photos:ad_images(storage_path,position)")
         .eq("status", "pending")
         .order("created_at", { ascending: true })
         .limit(50),
@@ -410,7 +422,16 @@ export default function AdminWorkspace() {
     ]);
     const firstError = adsResult.error ?? issuesResult.error ?? pendingCount.error ?? activeCount.error ?? issueCount.error;
     if (firstError) throw new Error(firstError.message);
-    setAds(adsResult.data ?? []);
+    const adsWithPhotos = await Promise.all((adsResult.data ?? []).map(async (ad) => {
+      const photo = [...(ad.photos ?? [])].sort((a, b) => a.position - b.position)[0];
+      if (!photo) throw new Error(`Pending listing "${ad.title}" has no photo to review.`);
+      const { data: signedPhoto, error: photoError } = await supabase.storage
+        .from("ad-images")
+        .createSignedUrl(photo.storage_path, 3600);
+      if (photoError) throw new Error(`Could not load a review photo: ${photoError.message}`);
+      return { ...ad, photoUrl: signedPhoto.signedUrl };
+    }));
+    setAds(adsWithPhotos);
     setIssues(issuesResult.data ?? []);
     setCounts({
       pendingAds: pendingCount.count ?? 0,
@@ -452,11 +473,12 @@ export default function AdminWorkspace() {
     const unsubscribe = onAuthStateChanged(getFirebaseAuth(), async (currentUser) => {
       if (!active) return;
       if (!currentUser) {
-        router.replace("/login?next=%2Fadmin");
+        router.replace(`/login?next=${encodeURIComponent(workspacePath)}`);
         return;
       }
       setUser(currentUser);
       setLoading(true);
+      setAccessDenied(false);
       setError("");
       try {
         await prepareUserForMarketplace(currentUser);
@@ -468,9 +490,15 @@ export default function AdminWorkspace() {
         if (roleError) throw new Error(roleError.message);
         if (data?.role !== "admin" && data?.role !== "moderator") {
           setRole(null);
+          setAccessDenied(true);
           return;
         }
         const currentRole = data.role;
+        if (currentRole !== requiredRole) {
+          setRole(null);
+          setAccessDenied(true);
+          return;
+        }
         setRole(currentRole);
         await loadWorkspace(currentRole);
       } catch (caught) {
@@ -483,7 +511,7 @@ export default function AdminWorkspace() {
       active = false;
       unsubscribe();
     };
-  }, [firebaseConfigured, loadWorkspace, router]);
+  }, [firebaseConfigured, loadWorkspace, requiredRole, router, workspacePath]);
 
   async function refresh() {
     if (!role) return;
@@ -697,6 +725,21 @@ export default function AdminWorkspace() {
     return <main className="mx-auto min-h-[65vh] max-w-7xl px-4 py-16 text-center text-sm text-slate-600 sm:px-6 lg:px-8">Checking your secure TurnOver workspace access…</main>;
   }
 
+  if (accessDenied) {
+    return (
+      <main className="mx-auto min-h-[65vh] max-w-3xl px-4 py-16 sm:px-6">
+        <Panel>
+          <h1 className="text-xl font-bold text-slate-950">{requiredRole === "admin" ? "Administrator access required" : "Moderator access required"}</h1>
+          <p className="mt-3 text-sm leading-6 text-slate-600">
+            {requiredRole === "admin"
+              ? "This private admin console is available only to administrators. Moderators can use the separate moderation page."
+              : "This review workspace is available only to moderators. Administrators can review listings from the admin console."}
+          </p>
+        </Panel>
+      </main>
+    );
+  }
+
   if (error && !role) {
     return (
       <main className="mx-auto min-h-[65vh] max-w-3xl px-4 py-16 sm:px-6">
@@ -739,7 +782,7 @@ export default function AdminWorkspace() {
           <PageTitle
             description="Review listings, track site issues, and keep the marketplace trustworthy."
             eyebrow={role === "admin" ? "Administrator" : "Moderator"}
-            title="TurnOver operations"
+            title={role === "admin" ? "Administrator console" : "Moderator review"}
           />
           <div className="flex items-center gap-3">
             <span className="max-w-48 truncate text-xs text-slate-500">{user?.email}</span>
@@ -803,12 +846,21 @@ export default function AdminWorkspace() {
             <PageTitle description="Only approved ads become public. Moderators can review and decide listing status, but cannot change ad content or staff permissions." eyebrow="Private queue" title={`Ads awaiting review · ${ads.length}`} />
             {ads.length === 0 ? <EmptyState title="The review queue is clear" text="New submissions will appear here as soon as they are sent for approval." /> : ads.map((ad) => (
               <Panel className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between" key={ad.id}>
+                {ad.photoUrl && (
+                  <div
+                    aria-label={`Photo of ${ad.title}`}
+                    className="aspect-[4/3] w-full shrink-0 rounded-xl bg-slate-100 bg-cover bg-center sm:w-44"
+                    role="img"
+                    style={{ backgroundImage: `url("${ad.photoUrl}")` }}
+                  />
+                )}
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <h2 className="font-bold text-slate-950">{ad.title}</h2>
                     <span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-semibold capitalize text-amber-800">{ad.status}</span>
                   </div>
                   <p className="mt-2 text-sm font-semibold text-slate-800">{formatBDT(ad.price)} · {ad.condition}</p>
+                  <p className="mt-2 line-clamp-3 text-sm leading-6 text-slate-600">{ad.description}</p>
                   <p className="mt-1 text-xs leading-5 text-slate-500">
                     {[ad.category?.[0]?.name_en, ad.location?.[0]?.name_en, ad.seller?.[0]?.display_name, dateFormatter.format(new Date(ad.created_at))].filter(Boolean).join(" · ")}
                   </p>
@@ -978,6 +1030,34 @@ export default function AdminWorkspace() {
 }
 ```
 
+## src/app/api/locale/route.ts
+
+```typescript
+import { NextResponse } from "next/server";
+
+export async function POST(request: Request) {
+  const body: unknown = await request.json();
+  if (
+    typeof body !== "object" ||
+    body === null ||
+    !("locale" in body) ||
+    (body.locale !== "en" && body.locale !== "bn")
+  ) {
+    return NextResponse.json({ error: "Choose English or Bangla." }, { status: 400 });
+  }
+
+  const response = NextResponse.json({ locale: body.locale });
+  response.cookies.set("turnover-locale", body.locale, {
+    httpOnly: true,
+    maxAge: 60 * 60 * 24 * 365,
+    path: "/",
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+  });
+  return response;
+}
+```
+
 ## src/app/globals.css
 
 ```css
@@ -1012,7 +1092,9 @@ body {
 ```tsx
 import type { Metadata } from "next";
 import Link from "next/link";
+import { cookies } from "next/headers";
 import AccountControls from "@/components/account-controls";
+import LocaleSwitcher, { type Locale } from "@/components/locale-switcher";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -1021,9 +1103,46 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false }, // Remove when ready for production in Phase 9.
 };
 
-export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  const cookieStore = await cookies();
+  const locale: Locale = cookieStore.get("turnover-locale")?.value === "bn" ? "bn" : "en";
+  const copy = locale === "bn" ? {
+    categories: "বিভাগ",
+    featured: "বিশেষ বিজ্ঞাপন",
+    latest: "নতুন বিজ্ঞাপন",
+    post: "বিজ্ঞাপন দিন",
+    explore: "ঘুরে দেখুন",
+    seller: "বিক্রেতাদের জন্য",
+    safety: "নিরাপদ কেনাবেচা",
+    selling: "বিক্রির নিয়ম",
+    help: "সহায়তা",
+    safetyText: "জনসমাগমপূর্ণ স্থানে দেখা করুন। টাকা দেওয়ার আগে পণ্য যাচাই করুন। কাউকে OTP দেবেন না।",
+    footerText: "বাংলাদেশের যেকোনো জায়গায় কেনাবেচা আরও সহজ করছি।",
+    safe: "নিরাপদে কিনুন। আত্মবিশ্বাসের সঙ্গে বিক্রি করুন।",
+    searchPlaceholder: "মোবাইল, আসবাবপত্র, আরও অনেক কিছু খুঁজুন...",
+    allCategories: "সব বিভাগ",
+    featuredAds: "বিশেষ বিজ্ঞাপন",
+    latestListings: "সাম্প্রতিক বিজ্ঞাপন",
+  } : {
+    categories: "Categories",
+    featured: "Featured",
+    latest: "Latest ads",
+    post: "Post an ad",
+    explore: "Explore",
+    seller: "For sellers",
+    safety: "A safer marketplace",
+    selling: "Selling safely",
+    help: "Help & support",
+    safetyText: "Meet in a public place. Check your item before you pay. Never share your one-time password.",
+    footerText: "Making it easier to buy and sell, wherever you are in Bangladesh.",
+    safe: "Buy local. Sell with confidence.",
+    searchPlaceholder: "Search mobiles, furniture, more...",
+    allCategories: "All categories",
+    featuredAds: "Featured ads",
+    latestListings: "Latest listings",
+  };
   return (
-    <html lang="en">
+    <html lang={locale}>
       <body>
         <header className="sticky top-0 z-30 border-b border-slate-200/80 bg-white/95 backdrop-blur-md">
           <div className="mx-auto flex h-[68px] max-w-7xl items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
@@ -1041,22 +1160,20 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
             </Link>
 
             <nav aria-label="Main navigation" className="hidden items-center gap-7 md:flex">
-              <a className="text-sm font-medium text-slate-600 transition hover:text-emerald-800" href="#categories-heading">Categories</a>
-              <a className="text-sm font-medium text-slate-600 transition hover:text-emerald-800" href="#featured-heading">Featured</a>
-              <a className="text-sm font-medium text-slate-600 transition hover:text-emerald-800" href="#latest">Latest ads</a>
+              <Link className="text-sm font-medium text-slate-600 transition hover:text-emerald-800" href="/#categories-heading">{copy.categories}</Link>
+              <Link className="text-sm font-medium text-slate-600 transition hover:text-emerald-800" href="/#featured-heading">{copy.featured}</Link>
+              <Link className="text-sm font-medium text-slate-600 transition hover:text-emerald-800" href="/#latest">{copy.latest}</Link>
             </nav>
 
             <div className="flex shrink-0 items-center gap-2 sm:gap-4">
-              <span aria-label="English interface" className="hidden items-center gap-1 text-xs font-semibold sm:inline-flex">
-                <span className="text-emerald-800">EN</span><span className="text-slate-300">/</span><span className="text-slate-500">বাংলা</span>
-              </span>
-              <AccountControls />
-              <a className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-emerald-700 px-3.5 text-sm font-bold text-white transition hover:bg-emerald-800 sm:min-h-11 sm:px-5" href="#sell">
+              <LocaleSwitcher locale={locale} />
+              <AccountControls locale={locale} />
+              <Link className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-emerald-700 px-3.5 text-sm font-bold text-white transition hover:bg-emerald-800 sm:min-h-11 sm:px-5" href="/post">
                 <svg aria-hidden="true" fill="none" height="17" viewBox="0 0 24 24" width="17">
                   <path d="M12 5v14M5 12h14" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
                 </svg>
-                <span>Post an ad</span>
-              </a>
+                <span>{copy.post}</span>
+              </Link>
             </div>
           </div>
           <div className="border-t border-slate-100 px-4 py-2.5 md:hidden">
@@ -1066,7 +1183,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
                 <path d="m16 16 4 4" stroke="currentColor" strokeLinecap="round" strokeWidth="1.8" />
               </svg>
               <label className="sr-only" htmlFor="mobile-search">Search ads</label>
-              <input autoComplete="off" className="h-10 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-slate-500" id="mobile-search" name="q" placeholder="Search mobiles, furniture, more..." />
+              <input autoComplete="off" className="h-10 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-slate-500" id="mobile-search" name="q" placeholder={copy.searchPlaceholder} />
               <button aria-label="Search" className="grid size-8 shrink-0 place-items-center rounded-lg bg-emerald-700 text-white" type="submit">
                 <svg aria-hidden="true" fill="none" height="16" viewBox="0 0 24 24" width="16">
                   <circle cx="10.8" cy="10.8" r="6.8" stroke="currentColor" strokeWidth="1.8" />
@@ -1081,33 +1198,33 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
           <div className="mx-auto grid max-w-7xl gap-10 px-4 py-10 sm:px-6 md:grid-cols-[1.4fr_1fr_1fr_1fr] lg:px-8 lg:py-14">
             <div>
               <Link className="text-xl font-extrabold tracking-tight text-slate-950" href="/">Turn<span className="text-emerald-700">Over</span></Link>
-              <p className="mt-3 max-w-xs text-sm leading-6 text-slate-500">Good finds, good people. Making it easier to buy and sell, wherever you are in Bangladesh.</p>
+              <p className="mt-3 max-w-xs text-sm leading-6 text-slate-500">Good finds, good people. {copy.footerText}</p>
             </div>
             <div>
-              <h2 className="text-sm font-bold text-slate-900">Explore</h2>
+              <h2 className="text-sm font-bold text-slate-900">{copy.explore}</h2>
               <ul className="mt-4 space-y-3 text-sm text-slate-500">
-                <li><a className="hover:text-emerald-800" href="#categories-heading">All categories</a></li>
-                <li><a className="hover:text-emerald-800" href="#featured-heading">Featured ads</a></li>
-                <li><a className="hover:text-emerald-800" href="#latest">Latest listings</a></li>
+                <li><Link className="hover:text-emerald-800" href="/#categories-heading">{copy.allCategories}</Link></li>
+                <li><Link className="hover:text-emerald-800" href="/#featured-heading">{copy.featuredAds}</Link></li>
+                <li><Link className="hover:text-emerald-800" href="/#latest">{copy.latestListings}</Link></li>
               </ul>
             </div>
             <div>
-              <h2 className="text-sm font-bold text-slate-900">For sellers</h2>
+              <h2 className="text-sm font-bold text-slate-900">{copy.seller}</h2>
               <ul className="mt-4 space-y-3 text-sm text-slate-500">
-                <li><a className="hover:text-emerald-800" href="#sell">Post an ad</a></li>
-                <li><a className="hover:text-emerald-800" href="#sell">Selling safely</a></li>
-                <li><a className="hover:text-emerald-800" href="#sell">Help & support</a></li>
+                <li><Link className="hover:text-emerald-800" href="/post">Post an ad</Link></li>
+                <li><Link className="hover:text-emerald-800" href="/post">{copy.selling}</Link></li>
+                <li><Link className="hover:text-emerald-800" href="/#sell">{copy.help}</Link></li>
               </ul>
             </div>
             <div>
-              <h2 className="text-sm font-bold text-slate-900">A safer marketplace</h2>
-              <p className="mt-4 text-sm leading-6 text-slate-500">Meet in a public place. Check your item before you pay. Never share your one-time password.</p>
+              <h2 className="text-sm font-bold text-slate-900">{copy.safety}</h2>
+              <p className="mt-4 text-sm leading-6 text-slate-500">{copy.safetyText}</p>
             </div>
           </div>
           <div className="border-t border-slate-100">
             <div className="mx-auto flex max-w-7xl flex-col gap-2 px-4 py-4 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between sm:px-6 lg:px-8">
               <span>© {new Date().getFullYear()} TurnOver. Built for Bangladesh.</span>
-              <span>Buy local. Sell with confidence.</span>
+              <span>{copy.safe}</span>
             </div>
           </div>
         </footer>
@@ -1123,13 +1240,35 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
-import { onAuthStateChanged, sendSignInLinkToEmail, signInWithEmailLink, signOut, type User } from "@firebase/auth";
+import { getRedirectResult, GoogleAuthProvider, onAuthStateChanged, sendSignInLinkToEmail, signInWithEmailLink, signInWithPopup, signInWithRedirect, signOut, type User } from "@firebase/auth";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/client";
 import { prepareUserForMarketplace } from "@/lib/firebase/prepare-user";
 
 function messageForError(error: unknown): string {
+  if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") {
+    switch (error.code) {
+      case "auth/operation-not-allowed":
+        return "Google sign-in is not enabled for this Firebase project yet. Enable Google under Firebase Authentication → Sign-in method.";
+      case "auth/unauthorized-domain":
+        return "This website domain is not authorized in Firebase Authentication. Add it under Authentication → Settings → Authorized domains.";
+      case "auth/popup-blocked":
+        return "Your browser blocked the Google sign-in window. Allow pop-ups for this site and try again.";
+      case "auth/popup-closed-by-user":
+        return "The Google sign-in window was closed before sign-in finished. You can try again.";
+      case "auth/account-exists-with-different-credential":
+        return "An account already exists with this email. Sign in using the provider you originally used.";
+      case "auth/cancelled-popup-request":
+        return "A Google sign-in attempt is already open. Finish that window or close it before trying again.";
+    }
+  }
   return error instanceof Error ? error.message : "Something went wrong. Please try again.";
+}
+
+function getAuthErrorCode(error: unknown): string | null {
+  return typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+    ? error.code
+    : null;
 }
 
 export default function LoginForm() {
@@ -1154,6 +1293,56 @@ export default function LoginForm() {
     });
   }, [configured]);
 
+  useEffect(() => {
+    if (!configured || window.sessionStorage.getItem("turnover-google-redirect") !== "pending") return;
+    let active = true;
+    window.sessionStorage.removeItem("turnover-google-redirect");
+    getRedirectResult(getFirebaseAuth())
+      .then(async (result) => {
+        if (!result || !active) return;
+        setUser(result.user);
+        await prepareUserForMarketplace(result.user);
+        if (active) router.replace(nextPath);
+      })
+      .catch((caught: unknown) => {
+        if (active) setError(messageForError(caught));
+      });
+    return () => {
+      active = false;
+    };
+  }, [configured, nextPath, router]);
+
+  async function signInWithGoogle() {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      if (!configured) throw new Error("Firebase is not configured. Copy .env.example to .env.local and restart the app.");
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: "select_account" });
+      const auth = getFirebaseAuth();
+      const signedIn = await signInWithPopup(auth, provider);
+      setUser(signedIn.user);
+      await prepareUserForMarketplace(signedIn.user);
+      router.replace(nextPath);
+    } catch (caught) {
+      if (getAuthErrorCode(caught) === "auth/popup-blocked") {
+        try {
+          window.sessionStorage.setItem("turnover-google-redirect", "pending");
+          await signInWithRedirect(getFirebaseAuth(), new GoogleAuthProvider());
+          return;
+        } catch (redirectError) {
+          window.sessionStorage.removeItem("turnover-google-redirect");
+          setError(messageForError(redirectError));
+          return;
+        }
+      }
+      setError(messageForError(caught));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
@@ -1168,6 +1357,7 @@ export default function LoginForm() {
       if (isLink) {
         const signedIn = await signInWithEmailLink(auth, normalizedEmail, window.location.href);
         window.localStorage.removeItem("turnover-signin-email");
+        setUser(signedIn.user);
         await prepareUserForMarketplace(signedIn.user);
         router.replace(nextPath);
         return;
@@ -1219,7 +1409,7 @@ export default function LoginForm() {
             {isLink ? "Finish signing in" : "Welcome to TurnOver"}
           </h1>
           <p className="mt-3 max-w-md text-sm leading-6 text-slate-600">
-            We’ll email you a one-time sign-in link. No password to remember. Open the link on this same device to continue.
+            New here or returning? Continue with Google or use a one-time email link. First-time sign-in creates your account automatically.
           </p>
 
           {user ? (
@@ -1227,17 +1417,38 @@ export default function LoginForm() {
               <p className="rounded-xl bg-emerald-50 p-4 text-sm text-emerald-950">
                 Signed in as <span className="font-semibold">{user.email}</span>.
               </p>
+              {error && <p aria-live="assertive" className="rounded-xl bg-rose-50 p-3 text-sm leading-6 text-rose-800">{error}</p>}
               <button className="min-h-12 w-full rounded-xl bg-emerald-700 px-5 text-sm font-bold text-white hover:bg-emerald-800 disabled:opacity-60" disabled={busy} onClick={finishMarketplaceSetup} type="button">
                 {busy ? "Connecting your account…" : "Continue to TurnOver"}
               </button>
+              <p className="text-center text-xs leading-5 text-slate-500">First time here? Google sign-in creates your account automatically.</p>
               <button className="w-full py-2 text-sm font-semibold text-slate-600 hover:text-slate-900" onClick={leaveAccount} type="button">
-                Sign out
+                Use another account
               </button>
             </div>
           ) : (
             <>
               {!configured && <p className="mt-6 rounded-xl bg-amber-50 p-3 text-sm leading-6 text-amber-900">Firebase is not configured yet. Copy `.env.example` to `.env.local`, then restart the development server.</p>}
               <form className="mt-8 space-y-4" onSubmit={handleSubmit}>
+                <button
+                  className="flex min-h-12 w-full items-center justify-center gap-3 rounded-xl border border-slate-300 bg-white px-5 text-sm font-bold text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={busy || !configured || isLink}
+                  onClick={signInWithGoogle}
+                  type="button"
+                >
+                  <svg aria-hidden="true" height="18" viewBox="0 0 48 48" width="18">
+                    <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5Z" />
+                    <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.76 7.18l7.73 6C44.42 37.93 46.98 31.84 46.98 24.55Z" />
+                    <path fill="#FBBC05" d="M10.53 28.59A14.4 14.4 0 0 1 9.75 24c0-1.59.27-3.13.76-4.59l-7.98-6.19A23.9 23.9 0 0 0 0 24c0 3.87.93 7.53 2.56 10.78l7.97-6.19Z" />
+                    <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.91-5.8l-7.73-6c-2.14 1.44-4.89 2.3-8.18 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48Z" />
+                  </svg>
+                  Continue with Google to sign up or log in
+                </button>
+                <div className="flex items-center gap-3 text-xs font-medium text-slate-400">
+                  <span className="h-px flex-1 bg-slate-200" />
+                  OR USE EMAIL
+                  <span className="h-px flex-1 bg-slate-200" />
+                </div>
                 <label className="block text-sm font-semibold text-slate-800" htmlFor="email">Email address</label>
                 <input
                   autoComplete="email"
@@ -1258,7 +1469,6 @@ export default function LoginForm() {
             </>
           )}
 
-          {user && error && <p aria-live="assertive" className="mt-4 rounded-xl bg-rose-50 p-3 text-sm leading-6 text-rose-800">{error}</p>}
           <p className="mt-6 text-xs leading-5 text-slate-500">
             By continuing, you agree to use TurnOver safely and honestly. Your email link verifies control of your inbox.
           </p>
@@ -1286,7 +1496,7 @@ import LoginForm from "./login-form";
 
 export const metadata: Metadata = {
   title: "Sign in | TurnOver",
-  description: "Sign in to your TurnOver marketplace account using a secure email link.",
+  description: "Sign in to your TurnOver marketplace account with Google or a secure one-time email link.",
   robots: { index: false, follow: false },
 };
 
@@ -1299,15 +1509,112 @@ export default function LoginPage() {
 }
 ```
 
+## src/app/moderation/page.tsx
+
+```tsx
+import type { Metadata } from "next";
+import AdminWorkspace from "../admin/workspace";
+
+export const metadata: Metadata = {
+  title: "Moderation queue | TurnOver",
+  description: "Review and approve TurnOver community listings.",
+  robots: { index: false, follow: false },
+};
+
+export default function ModerationPage() {
+  return <AdminWorkspace initialTab="ads" requiredRole="moderator" workspacePath="/moderation" />;
+}
+```
+
 ## src/app/page.tsx
 
 ```tsx
+import Link from "next/link";
+import { cookies } from "next/headers";
 import { getHomepageCategories } from "@/lib/categories";
+import { getHomepageListings, getHomepageLocations } from "@/lib/listings";
+import { formatBDT } from "@/lib/format";
+import type { Locale } from "@/components/locale-switcher";
 
 export const dynamic = "force-dynamic";
 
-export default async function HomePage() {
-  const categories = await getHomepageCategories();
+export default async function HomePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ q?: string; category?: string; location?: string }>;
+}) {
+  const filters = await searchParams;
+  const cookieStore = await cookies();
+  const locale: Locale = cookieStore.get("turnover-locale")?.value === "bn" ? "bn" : "en";
+  const copy = locale === "bn" ? {
+    tagline: "আপনার এলাকার কেনাবেচার বাজার",
+    headline: <>ভালো পছন্দ। <span className="text-emerald-700">ভালো মানুষ।</span></>,
+    intro: "বাংলাদেশজুড়ে আপনার পছন্দের জিনিস কিনুন ও বিক্রি করুন। নতুন কিছু খুঁজে পাওয়ার সহজ উপায়।",
+    search: "কী খুঁজছেন?",
+    allCategories: "সব বিভাগ",
+    allLocations: "সারা বাংলাদেশ",
+    searchButton: "খুঁজুন",
+    trending: "জনপ্রিয়:",
+    local: "আপনার আরও কাছে",
+    thoughtful: "আরও আন্তরিক।",
+    browse: "বিভাগ অনুযায়ী দেখুন",
+    nearby: "আপনার কাছেই পেয়ে যান",
+    featuredEyebrow: "আপনার জন্য বাছাই করা",
+    featured: "বিশেষ বিজ্ঞাপন",
+    noFeatured: "এখনো কোনো বিশেষ বিজ্ঞাপন নেই",
+    featuredEmpty: "যাচাই ও অনুমোদনের পর বিশেষ বিজ্ঞাপন এখানে দেখা যাবে।",
+    fresh: "বাজারে নতুন",
+    latest: "সাম্প্রতিক বিজ্ঞাপন",
+    yourSearch: "আপনার অনুসন্ধান",
+    matching: "মিলে যাওয়া বিজ্ঞাপন",
+    noMatch: "এই অনুসন্ধানে কোনো বিজ্ঞাপন নেই",
+    gettingStarted: "বাজারটি এখনই শুরু হচ্ছে",
+    approvedOnly: "অনুমোদিত বিজ্ঞাপন যাচাইয়ের পর এখানে দেখা যাবে। অন্যভাবে খুঁজুন, অথবা প্রথম বিজ্ঞাপনটি দিন।",
+    clear: "অনুসন্ধান মুছুন",
+    sell: "কিছু বিক্রি করতে চান?",
+    buyerNearby: "আপনার পরের ক্রেতা কাছেই।",
+    createListing: "বিজ্ঞাপন দিন এবং কাউকে তার প্রয়োজনীয় জিনিসটি খুঁজে পেতে সাহায্য করুন।",
+    post: "বিজ্ঞাপন দিন",
+    photo: "ছবি",
+  } : {
+    tagline: "Your neighborhood marketplace",
+    headline: <>Good finds. <span className="text-emerald-700">Good people.</span></>,
+    intro: "Buy and sell the things you love, right here in Bangladesh. A simpler way to find your next favorite thing.",
+    search: "What are you looking for?",
+    allCategories: "All categories",
+    allLocations: "All Bangladesh",
+    searchButton: "Search",
+    trending: "Trending:",
+    local: "A little more local",
+    thoughtful: "A lot more thoughtful.",
+    browse: "Browse by category",
+    nearby: "A good find is just around the corner",
+    featuredEyebrow: "Handpicked for you",
+    featured: "Featured finds",
+    noFeatured: "No featured listings yet",
+    featuredEmpty: "Featured listings will appear here after they have been reviewed and approved.",
+    fresh: "Fresh on the market",
+    latest: "Latest listings",
+    yourSearch: "Your search",
+    matching: "Matching listings",
+    noMatch: "No listings match that search yet",
+    gettingStarted: "The marketplace is just getting started",
+    approvedOnly: "Approved listings appear here after review. Try another search, or be the first to share a great local find.",
+    clear: "Clear search",
+    sell: "Have something to sell?",
+    buyerNearby: "Your next buyer is nearby.",
+    createListing: "Create a listing and help someone find exactly what they need.",
+    post: "Post an ad",
+    photo: "Photo",
+  };
+  const query = filters.q?.trim() ?? "";
+  const selectedCategory = filters.category ?? "";
+  const selectedLocation = filters.location ?? "";
+  const [listings, locations, categories] = await Promise.all([
+    getHomepageListings({ query, category: selectedCategory, location: selectedLocation }),
+    getHomepageLocations(),
+    getHomepageCategories(),
+  ]);
   return (
     <main>
       <section className="overflow-hidden bg-[#f2f7f3]">
@@ -1315,13 +1622,13 @@ export default async function HomePage() {
           <div className="relative z-10">
             <span className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-white/80 px-3 py-1.5 text-xs font-semibold text-emerald-900">
               <span aria-hidden="true" className="size-2 rounded-full bg-emerald-500" />
-              Your neighborhood marketplace
+              {copy.tagline}
             </span>
             <h1 className="mt-5 max-w-2xl text-4xl font-bold leading-[1.1] tracking-tight text-slate-950 sm:text-5xl lg:text-6xl">
-              Good finds. <span className="text-emerald-700">Good people.</span>
+              {copy.headline}
             </h1>
             <p className="mt-5 max-w-xl text-base leading-7 text-slate-600 sm:text-lg">
-              Buy and sell the things you love, right here in Bangladesh. A simpler way to find your next favorite thing.
+              {copy.intro}
             </p>
 
             <form action="/" className="mt-8 rounded-2xl border border-slate-200 bg-white p-3 shadow-xl shadow-emerald-950/5 sm:p-2">
@@ -1331,15 +1638,15 @@ export default async function HomePage() {
                     <circle cx="10.8" cy="10.8" r="6.8" stroke="currentColor" strokeWidth="1.8" />
                     <path d="m16 16 4 4" stroke="currentColor" strokeLinecap="round" strokeWidth="1.8" />
                   </svg>
-                  <span className="sr-only">What are you looking for?</span>
-                  <input className="w-full border-0 bg-transparent text-sm outline-none placeholder:text-slate-400" name="q" placeholder="What are you looking for?" />
+                  <span className="sr-only">{copy.search}</span>
+                  <input className="w-full border-0 bg-transparent text-sm outline-none placeholder:text-slate-400" defaultValue={query} name="q" placeholder={copy.search} />
                 </label>
                 <label className="flex min-h-12 items-center gap-2 border-t border-slate-100 px-3 sm:border-l sm:border-t-0">
                   <span aria-hidden="true" className="text-emerald-800">▦</span>
                   <span className="sr-only">Choose a category</span>
-                  <select className="w-full appearance-none bg-transparent text-sm text-slate-600 outline-none" defaultValue="" name="category">
-                    <option value="">All categories</option>
-                    {categories.map((category) => <option key={category.name} value={category.name}>{category.name}</option>)}
+                  <select className="w-full appearance-none bg-transparent text-sm text-slate-600 outline-none" defaultValue={selectedCategory} name="category">
+                    <option value="">{copy.allCategories}</option>
+                    {categories.map((category) => <option key={category.slug} value={category.slug}>{locale === "bn" ? category.bangla : category.name}</option>)}
                   </select>
                 </label>
                 <label className="flex min-h-12 items-center gap-2 border-t border-slate-100 px-3 sm:border-l sm:border-t-0">
@@ -1348,26 +1655,22 @@ export default async function HomePage() {
                     <circle cx="12" cy="10" r="2.2" stroke="currentColor" strokeWidth="1.7" />
                   </svg>
                   <span className="sr-only">Choose a location</span>
-                  <select className="w-full appearance-none bg-transparent text-sm text-slate-600 outline-none" defaultValue="" name="location">
-                    <option value="">All Bangladesh</option>
-                    <option>Dhaka</option>
-                    <option>Chattogram</option>
-                    <option>Rajshahi</option>
-                    <option>Khulna</option>
-                    <option>Sylhet</option>
+                  <select className="w-full appearance-none bg-transparent text-sm text-slate-600 outline-none" defaultValue={selectedLocation} name="location">
+                    <option value="">{copy.allLocations}</option>
+                    {locations.map((location) => <option key={location.id} value={location.id}>{locale === "bn" ? location.name_bn : location.name_en}</option>)}
                   </select>
                 </label>
                 <button className="min-h-12 rounded-xl bg-emerald-700 px-6 text-sm font-bold text-white transition hover:bg-emerald-800 focus-visible:outline-white" type="submit">
-                  Search
+                  {copy.searchButton}
                 </button>
               </div>
             </form>
 
             <div className="mt-5 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-slate-500">
-              <span className="font-semibold text-slate-600">Trending:</span>
-              <a className="rounded-full bg-white/80 px-3 py-1.5 hover:text-emerald-800" href="#latest">iPhone</a>
-              <a className="rounded-full bg-white/80 px-3 py-1.5 hover:text-emerald-800" href="#latest">Apartments</a>
-              <a className="rounded-full bg-white/80 px-3 py-1.5 hover:text-emerald-800" href="#latest">Motorbikes</a>
+              <span className="font-semibold text-slate-600">{copy.trending}</span>
+              <Link className="rounded-full bg-white/80 px-3 py-1.5 hover:text-emerald-800" href="/?q=iPhone#latest">iPhone</Link>
+              <Link className="rounded-full bg-white/80 px-3 py-1.5 hover:text-emerald-800" href="/?q=Apartments#latest">Apartments</Link>
+              <Link className="rounded-full bg-white/80 px-3 py-1.5 hover:text-emerald-800" href="/?q=Motorbikes#latest">Motorbikes</Link>
             </div>
           </div>
 
@@ -1379,12 +1682,12 @@ export default async function HomePage() {
               <span className="text-[9rem]">🛍️</span>
             </div>
             <div className="absolute left-2 top-14 rounded-2xl bg-white px-4 py-3 shadow-lg">
-              <span className="text-sm font-bold text-slate-900">A little more local</span>
-              <p className="mt-1 text-xs text-slate-500">A lot more thoughtful.</p>
+              <span className="text-sm font-bold text-slate-900">{copy.local}</span>
+              <p className="mt-1 text-xs text-slate-500">{copy.thoughtful}</p>
             </div>
             <div className="absolute bottom-8 right-1 rounded-2xl bg-white px-4 py-3 shadow-lg">
               <span className="text-xl">🤝</span>
-              <span className="ml-2 text-sm font-semibold text-slate-800">Buy. Sell. Smile.</span>
+              <span className="ml-2 text-sm font-semibold text-slate-800">{locale === "bn" ? "কিনুন। বিক্রি করুন। হাসুন।" : "Buy. Sell. Smile."}</span>
             </div>
           </div>
         </div>
@@ -1393,21 +1696,21 @@ export default async function HomePage() {
       <section aria-labelledby="categories-heading" className="mx-auto max-w-7xl px-4 py-12 sm:px-6 sm:py-16 lg:px-8">
         <div className="mb-6 flex items-end justify-between gap-4">
           <div>
-            <p className="text-xs font-bold uppercase tracking-[0.16em] text-emerald-700">Explore</p>
-            <h2 className="mt-2 text-2xl font-bold tracking-tight text-slate-950 sm:text-3xl" id="categories-heading">Browse by category</h2>
+            <p className="text-xs font-bold uppercase tracking-[0.16em] text-emerald-700">{locale === "bn" ? "ঘুরে দেখুন" : "Explore"}</p>
+            <h2 className="mt-2 text-2xl font-bold tracking-tight text-slate-950 sm:text-3xl" id="categories-heading">{copy.browse}</h2>
           </div>
-          <span className="mb-1 hidden text-sm text-slate-500 sm:block">A good find is just around the corner</span>
+          <span className="mb-1 hidden text-sm text-slate-500 sm:block">{copy.nearby}</span>
         </div>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:grid-cols-6">
           {categories.map((category) => (
-            <a className="group flex min-h-28 items-center gap-3 rounded-2xl border border-slate-200 bg-white p-3 transition hover:-translate-y-0.5 hover:border-emerald-300 hover:shadow-md sm:min-h-32 sm:flex-col sm:items-start sm:justify-between sm:p-4" href="#latest" key={category.name}>
+            <Link className="group flex min-h-28 items-center gap-3 rounded-2xl border border-slate-200 bg-white p-3 transition hover:-translate-y-0.5 hover:border-emerald-300 hover:shadow-md sm:min-h-32 sm:flex-col sm:items-start sm:justify-between sm:p-4" href={`/?category=${encodeURIComponent(category.slug)}#latest`} key={category.name}>
               <span aria-hidden="true" className={`grid size-12 shrink-0 place-items-center rounded-2xl text-2xl ${category.tone}`}>{category.icon}</span>
               <span className="min-w-0">
-                <span className="block text-sm font-semibold leading-5 text-slate-900 group-hover:text-emerald-800">{category.name}</span>
+                <span className="block text-sm font-semibold leading-5 text-slate-900 group-hover:text-emerald-800">{locale === "bn" ? category.bangla : category.name}</span>
                 <span className="mt-0.5 block text-xs text-slate-500">{category.bangla}</span>
               </span>
               <span aria-hidden="true" className="ml-auto hidden text-slate-400 group-hover:text-emerald-700 sm:block">↗</span>
-            </a>
+            </Link>
           ))}
         </div>
       </section>
@@ -1415,41 +1718,395 @@ export default async function HomePage() {
       <section aria-labelledby="featured-heading" className="bg-white py-12 sm:py-16">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <div className="mb-6">
-            <p className="text-xs font-bold uppercase tracking-[0.16em] text-emerald-700">Handpicked for you</p>
-            <h2 className="mt-2 text-2xl font-bold tracking-tight text-slate-950 sm:text-3xl" id="featured-heading">Featured finds</h2>
+            <p className="text-xs font-bold uppercase tracking-[0.16em] text-emerald-700">{copy.featuredEyebrow}</p>
+            <h2 className="mt-2 text-2xl font-bold tracking-tight text-slate-950 sm:text-3xl" id="featured-heading">{copy.featured}</h2>
           </div>
           <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-6 py-10 text-center sm:py-14">
             <span aria-hidden="true" className="text-4xl">✦</span>
-            <h3 className="mt-3 font-semibold text-slate-900">No featured listings yet</h3>
-            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-slate-600">Featured listings will appear here after they have been reviewed and approved.</p>
+            <h3 className="mt-3 font-semibold text-slate-900">{copy.noFeatured}</h3>
+            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-slate-600">{copy.featuredEmpty}</p>
           </div>
         </div>
       </section>
 
       <section aria-labelledby="latest-heading" className="mx-auto max-w-7xl px-4 py-12 sm:px-6 sm:py-16 lg:px-8" id="latest">
         <div className="mb-6">
-          <p className="text-xs font-bold uppercase tracking-[0.16em] text-emerald-700">Fresh on the market</p>
-          <h2 className="mt-2 text-2xl font-bold tracking-tight text-slate-950 sm:text-3xl" id="latest-heading">Latest listings</h2>
+          <p className="text-xs font-bold uppercase tracking-[0.16em] text-emerald-700">{query || selectedCategory || selectedLocation ? copy.yourSearch : copy.fresh}</p>
+          <h2 className="mt-2 text-2xl font-bold tracking-tight text-slate-950 sm:text-3xl" id="latest-heading">{query || selectedCategory || selectedLocation ? copy.matching : copy.latest}</h2>
         </div>
-        <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-10 text-center sm:py-14">
-          <span aria-hidden="true" className="text-4xl">⌂</span>
-          <h3 className="mt-3 font-semibold text-slate-900">The marketplace is just getting started</h3>
-          <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-slate-600">There are no approved listings yet. New ads will show here only after admin or moderator review.</p>
-        </div>
+        {listings.length === 0 ? (
+          <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-10 text-center sm:py-14">
+            <span aria-hidden="true" className="text-4xl">⌂</span>
+            <h3 className="mt-3 font-semibold text-slate-900">{query || selectedCategory || selectedLocation ? copy.noMatch : copy.gettingStarted}</h3>
+            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-slate-600">{copy.approvedOnly}</p>
+            {(query || selectedCategory || selectedLocation) && <Link className="mt-4 inline-flex min-h-10 items-center text-sm font-semibold text-emerald-800 hover:text-emerald-950" href="/#latest">{copy.clear}</Link>}
+          </div>
+        ) : (
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {listings.map((listing) => (
+              <article className="overflow-hidden rounded-2xl border border-slate-200 bg-white transition hover:-translate-y-0.5 hover:shadow-lg" key={listing.id}>
+                <div
+                  aria-label={`${copy.photo} of ${listing.title}`}
+                  className="aspect-[4/3] bg-slate-100 bg-cover bg-center"
+                  role="img"
+                  style={{ backgroundImage: `url("${listing.photoUrl}")` }}
+                />
+                <div className="p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <h3 className="line-clamp-2 font-semibold leading-5 text-slate-900">{listing.title}</h3>
+                    <span className="shrink-0 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold capitalize text-emerald-800">{listing.condition}</span>
+                  </div>
+                  <p className="mt-3 text-lg font-bold text-emerald-800">{formatBDT(listing.price)}</p>
+                  <p className="mt-2 flex items-center justify-between gap-3 text-xs text-slate-500">
+                    <span className="truncate">{listing.category} · {listing.location}</span>
+                    <span className="shrink-0">{new Intl.DateTimeFormat("en-BD", { dateStyle: "medium" }).format(new Date(listing.created_at))}</span>
+                  </p>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="px-4 pb-12 sm:px-6 sm:pb-16 lg:px-8" id="sell">
         <div className="mx-auto flex max-w-7xl flex-col items-start justify-between gap-6 overflow-hidden rounded-3xl bg-emerald-800 px-6 py-8 text-white sm:flex-row sm:items-center sm:px-10 sm:py-10">
           <div>
-            <p className="text-sm font-semibold text-emerald-200">Have something to sell?</p>
-            <h2 className="mt-2 text-2xl font-bold tracking-tight sm:text-3xl">Your next buyer is nearby.</h2>
-            <p className="mt-2 max-w-xl text-sm leading-6 text-emerald-100">Create a listing and help someone find exactly what they need.</p>
+            <p className="text-sm font-semibold text-emerald-200">{copy.sell}</p>
+            <h2 className="mt-2 text-2xl font-bold tracking-tight sm:text-3xl">{copy.buyerNearby}</h2>
+            <p className="mt-2 max-w-xl text-sm leading-6 text-emerald-100">{copy.createListing}</p>
           </div>
-          <a className="inline-flex min-h-12 shrink-0 items-center justify-center rounded-xl bg-amber-300 px-6 text-sm font-bold text-emerald-950 transition hover:bg-amber-200" href="#top">
-            Post an ad <span aria-hidden="true" className="ml-2">→</span>
+          <a className="inline-flex min-h-12 shrink-0 items-center justify-center rounded-xl bg-amber-300 px-6 text-sm font-bold text-emerald-950 transition hover:bg-amber-200" href="/post">
+            {copy.post} <span aria-hidden="true" className="ml-2">→</span>
           </a>
         </div>
       </section>
+    </main>
+  );
+}
+```
+
+## src/app/post/page.tsx
+
+```tsx
+import type { Metadata } from "next";
+import PostAdForm from "./post-ad-form";
+
+export const metadata: Metadata = {
+  title: "Post an ad | TurnOver",
+  description: "Create a local marketplace listing on TurnOver.",
+  robots: { index: false, follow: false },
+};
+
+export default function PostAdPage() {
+  return <PostAdForm />;
+}
+```
+
+## src/app/post/post-ad-form.tsx
+
+```tsx
+"use client";
+
+import { onAuthStateChanged, type User } from "@firebase/auth";
+import { useRouter } from "next/navigation";
+import { useEffect, useState, type FormEvent } from "react";
+import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/client";
+import { prepareUserForMarketplace } from "@/lib/firebase/prepare-user";
+import { createClient } from "@/lib/supabase/client";
+
+type CategoryOption = { id: string; name_en: string; name_bn: string };
+type LocationOption = { id: string; name_en: string; name_bn: string };
+const MAX_PHOTO_BYTES = 1_900_000;
+
+function messageForError(error: unknown): string {
+  return error instanceof Error ? error.message : "Something went wrong. Please try again.";
+}
+
+async function optimizeImage(file: File): Promise<Blob> {
+  if (!file.type.startsWith("image/")) throw new Error(`${file.name} is not an image.`);
+  const image = await createImageBitmap(file);
+  const scale = Math.min(1, 1600 / Math.max(image.width, image.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(image.width * scale));
+  canvas.height = Math.max(1, Math.round(image.height * scale));
+  const context = canvas.getContext("2d");
+  if (!context) {
+    image.close();
+    throw new Error("Your browser could not prepare that photo. Try a different image.");
+  }
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  let quality = 0.82;
+  try {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const blob = await new Promise<Blob | null>((resolve) => {
+        canvas.toBlob(resolve, "image/webp", quality);
+      });
+      if (!blob) throw new Error(`Could not prepare ${file.name} as a WebP image.`);
+      if (blob.size <= MAX_PHOTO_BYTES) return blob;
+      quality -= 0.14;
+      canvas.width = Math.max(1, Math.round(canvas.width * 0.85));
+      canvas.height = Math.max(1, Math.round(canvas.height * 0.85));
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    }
+    throw new Error(`${file.name} is too large to upload. Choose a smaller image.`);
+  } finally {
+    image.close();
+  }
+}
+
+export default function PostAdForm() {
+  const router = useRouter();
+  const firebaseConfigured = isFirebaseConfigured();
+  const [user, setUser] = useState<User | null>(null);
+  const [categories, setCategories] = useState<CategoryOption[]>([]);
+  const [locations, setLocations] = useState<LocationOption[]>([]);
+  const [files, setFiles] = useState<File[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!firebaseConfigured) return;
+    let active = true;
+    const unsubscribe = onAuthStateChanged(getFirebaseAuth(), async (currentUser) => {
+      if (!active) return;
+      if (!currentUser) {
+        router.replace("/login?next=%2Fpost");
+        return;
+      }
+
+      setUser(currentUser);
+      setLoading(true);
+      setError("");
+      try {
+        await prepareUserForMarketplace(currentUser);
+        const supabase = createClient();
+        const [categoryResult, locationResult] = await Promise.all([
+          supabase.from("categories")
+            .select("id,name_en,name_bn")
+            .is("parent_id", null)
+            .order("sort_order")
+            .order("name_en"),
+          supabase.from("locations")
+            .select("id,name_en,name_bn")
+            .eq("level", "area")
+            .order("name_en"),
+        ]);
+        if (categoryResult.error) throw new Error(categoryResult.error.message);
+        if (locationResult.error) throw new Error(locationResult.error.message);
+        if (active) {
+          setCategories(categoryResult.data ?? []);
+          setLocations(locationResult.data ?? []);
+        }
+      } catch (caught) {
+        if (active) setError(messageForError(caught));
+      } finally {
+        if (active) setLoading(false);
+      }
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [firebaseConfigured, router]);
+
+  async function submitAd(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!user) return;
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    if (files.length === 0) {
+      setError("Add at least one photo so buyers can see what you are listing.");
+      return;
+    }
+    if (files.length > 8) {
+      setError("Choose up to eight photos.");
+      return;
+    }
+
+    setBusy(true);
+    setError("");
+    setNotice("");
+    const supabase = createClient();
+    let adId: string | null = null;
+    const uploadedPaths: string[] = [];
+
+    try {
+      const preparedImages: Blob[] = [];
+      for (const file of files) preparedImages.push(await optimizeImage(file));
+      const newAdId = crypto.randomUUID();
+      const { error: insertError } = await supabase.from("ads").insert({
+        id: newAdId,
+        seller_id: user.uid,
+        category_id: String(formData.get("category_id") ?? ""),
+        location_id: String(formData.get("location_id") ?? ""),
+        title: String(formData.get("title") ?? "").trim(),
+        description: String(formData.get("description") ?? "").trim(),
+        price: Number(formData.get("price")),
+        negotiable: formData.get("negotiable") === "on",
+        condition: String(formData.get("condition") ?? "used"),
+        status: "draft",
+      });
+      if (insertError) throw new Error(insertError.message);
+      adId = newAdId;
+
+      for (const [position, image] of preparedImages.entries()) {
+        const imageId = crypto.randomUUID();
+        const storagePath = `${user.uid}/${newAdId}/${imageId}.webp`;
+        const { error: imageRowError } = await supabase.from("ad_images").insert({
+          id: imageId,
+          ad_id: newAdId,
+          owner_id: user.uid,
+          position,
+          storage_path: storagePath,
+          alt_text: String(formData.get("title") ?? "").trim(),
+        });
+        if (imageRowError) throw new Error(imageRowError.message);
+
+        const { error: uploadError } = await supabase.storage
+          .from("ad-images")
+          .upload(storagePath, image, { contentType: "image/webp", upsert: false });
+        if (uploadError) throw new Error(uploadError.message);
+        uploadedPaths.push(storagePath);
+      }
+
+      const { data: submittedAd, error: submitError } = await supabase.from("ads")
+        .update({ status: "pending" })
+        .eq("id", newAdId)
+        .eq("status", "draft")
+        .select("id")
+        .maybeSingle();
+      if (submitError) throw new Error(submitError.message);
+      if (!submittedAd) throw new Error("The draft could not be submitted. Refresh the page and try again.");
+
+      form.reset();
+      setFiles([]);
+      setNotice("Your ad is in the review queue. It will become public only after a moderator approves it.");
+    } catch (caught) {
+      const details = [messageForError(caught)];
+      if (adId) {
+        if (uploadedPaths.length > 0) {
+          const { error: storageCleanupError } = await supabase.storage.from("ad-images").remove(uploadedPaths);
+          if (storageCleanupError) details.push(`Photo cleanup also failed: ${storageCleanupError.message}`);
+        }
+        const { error: imageCleanupError } = await supabase.from("ad_images").delete().eq("ad_id", adId);
+        if (imageCleanupError) details.push(`Draft-photo cleanup also failed: ${imageCleanupError.message}`);
+        details.push("A private draft was retained; it was not sent for review.");
+      }
+      setError(details.join(" "));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!firebaseConfigured) {
+    return (
+      <main className="mx-auto min-h-[65vh] max-w-3xl px-4 py-16 sm:px-6">
+        <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <h1 className="text-xl font-bold text-slate-950">Sign-in setup is not complete</h1>
+          <p className="mt-3 text-sm leading-6 text-slate-600">Connect Firebase and Supabase using the steps in the setup guide before posting a listing.</p>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main className="min-h-[70vh] bg-slate-50 px-4 py-10 sm:px-6 sm:py-14">
+      <div className="mx-auto max-w-3xl">
+        <div className="mb-7">
+          <p className="text-xs font-bold uppercase tracking-[0.16em] text-emerald-700">Sell on TurnOver</p>
+          <h1 className="mt-2 text-3xl font-bold tracking-tight text-slate-950">Create your listing</h1>
+          <p className="mt-3 text-sm leading-6 text-slate-600">Add clear details and photos. Your ad stays private until a moderator reviews it.</p>
+        </div>
+
+        {loading ? (
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-600 shadow-sm">Preparing your secure seller account…</section>
+        ) : !user ? (
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+            <h2 className="font-bold text-slate-950">Sign in to post an ad</h2>
+            <p className="mt-2 text-sm text-slate-600">Create your account with Google or a one-time email link, then return to your listing.</p>
+            <a className="mt-5 inline-flex min-h-11 items-center rounded-xl bg-emerald-700 px-5 text-sm font-bold text-white hover:bg-emerald-800" href="/login?next=%2Fpost">Sign in to continue</a>
+          </section>
+        ) : (
+          <form className="space-y-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-8" onSubmit={submitAd}>
+            {error && <p aria-live="assertive" className="rounded-xl bg-rose-50 p-4 text-sm leading-6 text-rose-800">{error}</p>}
+            {notice && <p aria-live="polite" className="rounded-xl bg-emerald-50 p-4 text-sm leading-6 text-emerald-900">{notice}</p>}
+
+            <div className="grid gap-5 sm:grid-cols-2">
+              <label className="block text-sm font-semibold text-slate-800" htmlFor="title">
+                Ad title
+                <input autoComplete="off" className="mt-2 min-h-12 w-full rounded-xl border border-slate-300 px-4 font-normal outline-none focus:border-emerald-700 focus:ring-2 focus:ring-emerald-100" id="title" maxLength={120} minLength={5} name="title" placeholder="e.g. Gently used bicycle" required />
+              </label>
+              <label className="block text-sm font-semibold text-slate-800" htmlFor="category_id">
+                Category
+                <select className="mt-2 min-h-12 w-full rounded-xl border border-slate-300 bg-white px-4 font-normal outline-none focus:border-emerald-700 focus:ring-2 focus:ring-emerald-100" defaultValue="" id="category_id" name="category_id" required>
+                  <option disabled value="">Choose a category</option>
+                  {categories.map((category) => <option key={category.id} value={category.id}>{category.name_en} · {category.name_bn}</option>)}
+                </select>
+              </label>
+            </div>
+
+            <label className="block text-sm font-semibold text-slate-800" htmlFor="description">
+              Description
+              <textarea className="mt-2 min-h-36 w-full rounded-xl border border-slate-300 px-4 py-3 font-normal leading-6 outline-none focus:border-emerald-700 focus:ring-2 focus:ring-emerald-100" id="description" maxLength={10000} minLength={20} name="description" placeholder="Describe the item's condition, key details, and anything a buyer should know." required />
+            </label>
+
+            <div className="grid gap-5 sm:grid-cols-2">
+              <label className="block text-sm font-semibold text-slate-800" htmlFor="price">
+                Price (BDT)
+                <input className="mt-2 min-h-12 w-full rounded-xl border border-slate-300 px-4 font-normal outline-none focus:border-emerald-700 focus:ring-2 focus:ring-emerald-100" id="price" min="0" name="price" placeholder="e.g. 2500" required step="0.01" type="number" />
+              </label>
+              <label className="block text-sm font-semibold text-slate-800" htmlFor="location_id">
+                Neighborhood
+                <select className="mt-2 min-h-12 w-full rounded-xl border border-slate-300 bg-white px-4 font-normal outline-none focus:border-emerald-700 focus:ring-2 focus:ring-emerald-100" defaultValue="" id="location_id" name="location_id" required>
+                  <option disabled value="">Choose your area</option>
+                  {locations.map((location) => <option key={location.id} value={location.id}>{location.name_en} · {location.name_bn}</option>)}
+                </select>
+                {locations.length === 0 && <span className="mt-1 block text-xs font-normal text-amber-800">No areas are available yet. Ask an administrator to add locations.</span>}
+              </label>
+            </div>
+
+            <fieldset>
+              <legend className="text-sm font-semibold text-slate-800">Item condition</legend>
+              <div className="mt-2 flex gap-3">
+                <label className="flex min-h-11 flex-1 items-center gap-2 rounded-xl border border-slate-300 px-4 text-sm text-slate-700">
+                  <input defaultChecked name="condition" type="radio" value="used" /> Used
+                </label>
+                <label className="flex min-h-11 flex-1 items-center gap-2 rounded-xl border border-slate-300 px-4 text-sm text-slate-700">
+                  <input name="condition" type="radio" value="new" /> New
+                </label>
+              </div>
+            </fieldset>
+
+            <label className="flex min-h-11 items-center gap-3 text-sm text-slate-700">
+              <input className="size-4 accent-emerald-700" name="negotiable" type="checkbox" />
+              The price is negotiable
+            </label>
+
+            <label className="block text-sm font-semibold text-slate-800" htmlFor="photos">
+              Photos <span className="font-normal text-slate-500">(1–8 images, securely optimized before upload)</span>
+              <input
+                accept="image/*"
+                className="mt-2 block min-h-12 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-normal file:mr-3 file:min-h-8 file:rounded-lg file:border-0 file:bg-emerald-50 file:px-3 file:text-sm file:font-semibold file:text-emerald-800"
+                id="photos"
+                multiple
+                onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
+                required
+                type="file"
+              />
+              {files.length > 0 && <span className="mt-2 block text-xs font-normal text-slate-500">{files.length} photo{files.length === 1 ? "" : "s"} selected</span>}
+            </label>
+
+            <div className="rounded-xl bg-slate-50 p-4 text-xs leading-5 text-slate-600">
+              Be honest about the item and meet buyers in a safe public place. Your listing remains private until it is approved.
+            </div>
+            <button className="min-h-12 w-full rounded-xl bg-emerald-700 px-5 text-sm font-bold text-white transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-60" disabled={busy || categories.length === 0 || locations.length === 0} type="submit">
+              {busy ? "Preparing and submitting your ad…" : "Submit for moderator review"}
+            </button>
+          </form>
+        )}
+      </div>
     </main>
   );
 }
@@ -1460,19 +2117,46 @@ export default async function HomePage() {
 ```tsx
 "use client";
 
-import { onAuthStateChanged, signOut } from "@firebase/auth";
+import { onIdTokenChanged, signOut } from "@firebase/auth";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/client";
+import { createClient } from "@/lib/supabase/client";
+import type { Locale } from "./locale-switcher";
 
-export default function AccountControls() {
+export default function AccountControls({ locale }: { locale: Locale }) {
   const configured = isFirebaseConfigured();
   const [email, setEmail] = useState<string | null>(null);
+  const [staffHref, setStaffHref] = useState<"/admin" | "/moderation" | null>(null);
   const [authError, setAuthError] = useState("");
 
   useEffect(() => {
     if (!configured) return;
-    return onAuthStateChanged(getFirebaseAuth(), (user) => setEmail(user?.email ?? null));
+    let active = true;
+    const unsubscribe = onIdTokenChanged(getFirebaseAuth(), async (user) => {
+      if (!active) return;
+      setEmail(user?.email ?? null);
+      setStaffHref(null);
+      setAuthError("");
+      if (!user) return;
+      try {
+        const { data, error } = await createClient()
+          .from("user_roles")
+          .select("role")
+          .eq("user_id", user.uid)
+          .maybeSingle();
+        if (error) throw new Error(error.message);
+        if (active && (data?.role === "admin" || data?.role === "moderator")) {
+          setStaffHref(data.role === "admin" ? "/admin" : "/moderation");
+        }
+      } catch (caught) {
+        if (active) setAuthError(caught instanceof Error ? caught.message : "Could not check your staff access.");
+      }
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, [configured]);
 
   if (!configured) {
@@ -1480,16 +2164,16 @@ export default function AccountControls() {
   }
 
   if (!email) {
-    return <Link className="hidden text-sm font-semibold text-slate-700 transition hover:text-emerald-800 sm:inline-flex" href="/login">Log in</Link>;
+    return <Link className="inline-flex min-h-9 items-center rounded-lg px-2 text-xs font-semibold text-slate-700 transition hover:text-emerald-800 sm:text-sm" href="/login">{locale === "bn" ? "লগ ইন" : "Log in"}</Link>;
   }
 
   return (
-    <div className="hidden items-center gap-3 sm:flex">
-      <Link className="text-sm font-semibold text-slate-700 hover:text-emerald-800" href="/admin">Admin workspace</Link>
-      <span className="max-w-36 truncate text-xs text-slate-500">{email}</span>
-      {authError && <span aria-live="assertive" className="text-xs text-rose-700">{authError}</span>}
+    <div className="flex items-center gap-2 sm:gap-3">
+      {staffHref && <Link className="hidden text-sm font-semibold text-slate-700 hover:text-emerald-800 sm:inline-flex" href={staffHref}>{staffHref === "/admin" ? (locale === "bn" ? "অ্যাডমিন" : "Admin") : (locale === "bn" ? "মডারেশন" : "Moderation")}</Link>}
+      <span className="hidden max-w-36 truncate text-xs text-slate-500 md:inline">{email}</span>
+      {authError && <span aria-live="assertive" className="max-w-40 text-xs text-rose-700">{authError}</span>}
       <button
-        className="text-sm font-semibold text-slate-600 hover:text-slate-950"
+        className="min-h-9 rounded-lg px-2 text-xs font-semibold text-slate-600 hover:text-slate-950 sm:text-sm"
         onClick={async () => {
           try {
             await signOut(getFirebaseAuth());
@@ -1499,8 +2183,74 @@ export default function AccountControls() {
         }}
         type="button"
       >
-        Sign out
+        {locale === "bn" ? "লগ আউট" : "Sign out"}
       </button>
+    </div>
+  );
+}
+```
+
+## src/components/locale-switcher.tsx
+
+```tsx
+"use client";
+
+import { useRouter } from "next/navigation";
+import { useState } from "react";
+
+export type Locale = "en" | "bn";
+
+export default function LocaleSwitcher({ locale }: { locale: Locale }) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function changeLocale(nextLocale: Locale) {
+    if (busy || nextLocale === locale) return;
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch("/api/locale", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ locale: nextLocale }),
+      });
+      if (!response.ok) {
+        const result: unknown = await response.json();
+        const message = typeof result === "object" && result !== null && "error" in result && typeof result.error === "string"
+          ? result.error
+          : "Could not change the language.";
+        throw new Error(message);
+      }
+      router.refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not change the language.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div aria-label="Choose language" className="relative inline-flex items-center gap-1 rounded-full bg-slate-100 p-1 text-xs font-semibold" role="group">
+      <button
+        aria-pressed={locale === "en"}
+        className={`min-h-7 rounded-full px-2.5 transition ${locale === "en" ? "bg-white text-emerald-800 shadow-sm" : "text-slate-500 hover:text-slate-900"}`}
+        disabled={busy}
+        onClick={() => changeLocale("en")}
+        type="button"
+      >
+        EN
+      </button>
+      <button
+        aria-pressed={locale === "bn"}
+        className={`min-h-7 rounded-full px-2.5 transition ${locale === "bn" ? "bg-white text-emerald-800 shadow-sm" : "text-slate-500 hover:text-slate-900"}`}
+        disabled={busy}
+        onClick={() => changeLocale("bn")}
+        type="button"
+      >
+        বাংলা
+      </button>
+      {error && <span aria-live="assertive" className="absolute right-0 top-full z-50 mt-1 w-52 rounded-lg bg-rose-50 p-2 text-rose-800 shadow">{error}</span>}
     </div>
   );
 }
@@ -1706,6 +2456,106 @@ export function normalizeBDPhone(input: string): string | null {
     : compact.startsWith("880") ? `+${compact}`
     : compact.startsWith("01") ? `+88${compact}` : compact;
   return /^\+8801[3-9]\d{8}$/.test(normalized) ? normalized : null;
+}
+```
+
+## src/lib/listings.ts
+
+```typescript
+import "server-only";
+import { createClient } from "@supabase/supabase-js";
+
+export type HomepageLocation = { id: string; name_en: string; name_bn: string };
+
+export type HomepageListing = {
+  id: string;
+  title: string;
+  price: number;
+  condition: string;
+  created_at: string;
+  category: string;
+  location: string;
+  photoUrl: string;
+};
+
+function getPublicSupabaseClient() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+  if (!url || !key || url.includes("YOUR_PROJECT_REF") || key === "YOUR_PUBLISHABLE_KEY") return null;
+  return createClient(url, key, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+}
+
+export async function getHomepageLocations(): Promise<HomepageLocation[]> {
+  const supabase = getPublicSupabaseClient();
+  if (!supabase) return [];
+  const { data, error } = await supabase
+    .from("locations")
+    .select("id,name_en,name_bn")
+    .eq("level", "area")
+    .order("name_en");
+  if (error) throw new Error(`Could not load marketplace locations: ${error.message}`);
+  return data;
+}
+
+export async function getHomepageListings(filters: {
+  query?: string;
+  category?: string;
+  location?: string;
+}): Promise<HomepageListing[]> {
+  const supabase = getPublicSupabaseClient();
+  if (!supabase) return [];
+
+  let categoryId: string | undefined;
+  if (filters.category) {
+    const { data: category, error: categoryError } = await supabase
+      .from("categories")
+      .select("id")
+      .eq("slug", filters.category.slice(0, 100))
+      .maybeSingle();
+    if (categoryError) throw new Error(`Could not find the selected category: ${categoryError.message}`);
+    categoryId = category?.id ?? "00000000-0000-0000-0000-000000000000";
+  }
+
+  let request = supabase
+    .from("ads")
+    .select("id,title,price,condition,created_at,category:categories(name_en),location:locations(name_en),photos:ad_images(storage_path,position)")
+    .eq("status", "active")
+    .order("created_at", { ascending: false })
+    .limit(24);
+
+  const query = filters.query?.trim().slice(0, 80);
+  if (query) {
+    const escapedQuery = query.replace(/[\\%_]/g, "\\$&");
+    request = request.ilike("title", `%${escapedQuery}%`);
+  }
+  if (categoryId) request = request.eq("category_id", categoryId);
+  if (filters.location && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(filters.location)) {
+    request = request.eq("location_id", filters.location);
+  }
+
+  const { data, error } = await request;
+  if (error) throw new Error(`Could not load approved listings: ${error.message}`);
+
+  return Promise.all((data ?? []).map(async (listing) => {
+    const photo = [...(listing.photos ?? [])].sort((a, b) => a.position - b.position)[0];
+    if (!photo) throw new Error(`Approved listing ${listing.id} is missing its required photo.`);
+    const { data: signedPhoto, error: photoError } = await supabase.storage
+      .from("ad-images")
+      .createSignedUrl(photo.storage_path, 3600);
+    if (photoError) throw new Error(`Could not load a listing photo: ${photoError.message}`);
+    return {
+      id: listing.id,
+      title: listing.title,
+      price: Number(listing.price),
+      condition: listing.condition,
+      created_at: listing.created_at,
+      category: listing.category?.[0]?.name_en ?? "Marketplace",
+      location: listing.location?.[0]?.name_en ?? "Bangladesh",
+      photoUrl: signedPhoto.signedUrl,
+    };
+  }));
 }
 ```
 

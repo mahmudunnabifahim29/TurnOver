@@ -62,6 +62,8 @@ In the Supabase dashboard:
 
 The app's authenticated Firebase callable sets only the standard `role: authenticated` claim. Admin and moderator privileges are stored separately in `public.user_roles`; users cannot assign or change those roles from the browser.
 
+The site header has an **EN / বাংলা** switch. The selected language is saved in a secure, same-site cookie and applied to the storefront and shared navigation.
+
 ## 4. Apply the database schema
 
 Use a new/empty Supabase project for a first setup. If you have existing production data, take a database backup and review the ID conversion before applying the second migration. Do not paste the test bootstrap scripts into Supabase.
@@ -130,7 +132,7 @@ on conflict (user_id) do update set role = 'admin';
 
 Open http://localhost:3000/admin and sign in with that account. The email lookup table is private to the database; the Admin-only RPC supplies the account list for moderator assignment. Do not expose a public endpoint for adding Admins.
 
-Administrators can review ads, reports, bug findings, and account roles; see safe connection/security status; and grant or remove Moderator access at `/admin`. Moderators can use the dedicated `/moderation` queue to review pending ads and submit/view bug findings, but cannot manage users, inspect security details, or resolve ad reports. Secrets and raw security tokens are never displayed.
+The three separate app pages are the public marketplace (`/`), the administrator console (`/admin`), and the moderator review workspace (`/moderation`). Administrators can review ads, reports, bug findings, and account roles; see safe connection/security status; and grant or remove Moderator access. Moderators can use their dedicated review queue to approve/reject pending ads and submit/view bug findings, but cannot manage users, inspect security details, or resolve ad reports. Admins and moderators must sign in and have their respective trusted role provisioned. Secrets and raw security tokens are never displayed.
 
 ## 8. Create and approve listings
 

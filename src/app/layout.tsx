@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { cookies } from "next/headers";
 import AccountControls from "@/components/account-controls";
+import LocaleSwitcher, { type Locale } from "@/components/locale-switcher";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -9,9 +11,46 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false }, // Remove when ready for production in Phase 9.
 };
 
-export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  const cookieStore = await cookies();
+  const locale: Locale = cookieStore.get("turnover-locale")?.value === "bn" ? "bn" : "en";
+  const copy = locale === "bn" ? {
+    categories: "বিভাগ",
+    featured: "বিশেষ বিজ্ঞাপন",
+    latest: "নতুন বিজ্ঞাপন",
+    post: "বিজ্ঞাপন দিন",
+    explore: "ঘুরে দেখুন",
+    seller: "বিক্রেতাদের জন্য",
+    safety: "নিরাপদ কেনাবেচা",
+    selling: "বিক্রির নিয়ম",
+    help: "সহায়তা",
+    safetyText: "জনসমাগমপূর্ণ স্থানে দেখা করুন। টাকা দেওয়ার আগে পণ্য যাচাই করুন। কাউকে OTP দেবেন না।",
+    footerText: "বাংলাদেশের যেকোনো জায়গায় কেনাবেচা আরও সহজ করছি।",
+    safe: "নিরাপদে কিনুন। আত্মবিশ্বাসের সঙ্গে বিক্রি করুন।",
+    searchPlaceholder: "মোবাইল, আসবাবপত্র, আরও অনেক কিছু খুঁজুন...",
+    allCategories: "সব বিভাগ",
+    featuredAds: "বিশেষ বিজ্ঞাপন",
+    latestListings: "সাম্প্রতিক বিজ্ঞাপন",
+  } : {
+    categories: "Categories",
+    featured: "Featured",
+    latest: "Latest ads",
+    post: "Post an ad",
+    explore: "Explore",
+    seller: "For sellers",
+    safety: "A safer marketplace",
+    selling: "Selling safely",
+    help: "Help & support",
+    safetyText: "Meet in a public place. Check your item before you pay. Never share your one-time password.",
+    footerText: "Making it easier to buy and sell, wherever you are in Bangladesh.",
+    safe: "Buy local. Sell with confidence.",
+    searchPlaceholder: "Search mobiles, furniture, more...",
+    allCategories: "All categories",
+    featuredAds: "Featured ads",
+    latestListings: "Latest listings",
+  };
   return (
-    <html lang="en">
+    <html lang={locale}>
       <body>
         <header className="sticky top-0 z-30 border-b border-slate-200/80 bg-white/95 backdrop-blur-md">
           <div className="mx-auto flex h-[68px] max-w-7xl items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
@@ -29,21 +68,19 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
             </Link>
 
             <nav aria-label="Main navigation" className="hidden items-center gap-7 md:flex">
-              <Link className="text-sm font-medium text-slate-600 transition hover:text-emerald-800" href="/#categories-heading">Categories</Link>
-              <Link className="text-sm font-medium text-slate-600 transition hover:text-emerald-800" href="/#featured-heading">Featured</Link>
-              <Link className="text-sm font-medium text-slate-600 transition hover:text-emerald-800" href="/#latest">Latest ads</Link>
+              <Link className="text-sm font-medium text-slate-600 transition hover:text-emerald-800" href="/#categories-heading">{copy.categories}</Link>
+              <Link className="text-sm font-medium text-slate-600 transition hover:text-emerald-800" href="/#featured-heading">{copy.featured}</Link>
+              <Link className="text-sm font-medium text-slate-600 transition hover:text-emerald-800" href="/#latest">{copy.latest}</Link>
             </nav>
 
             <div className="flex shrink-0 items-center gap-2 sm:gap-4">
-              <span aria-label="English interface" className="hidden items-center gap-1 text-xs font-semibold sm:inline-flex">
-                <span className="text-emerald-800">EN</span><span className="text-slate-300">/</span><span className="text-slate-500">বাংলা</span>
-              </span>
-              <AccountControls />
+              <LocaleSwitcher locale={locale} />
+              <AccountControls locale={locale} />
               <Link className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-emerald-700 px-3.5 text-sm font-bold text-white transition hover:bg-emerald-800 sm:min-h-11 sm:px-5" href="/post">
                 <svg aria-hidden="true" fill="none" height="17" viewBox="0 0 24 24" width="17">
                   <path d="M12 5v14M5 12h14" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
                 </svg>
-                <span>Post an ad</span>
+                <span>{copy.post}</span>
               </Link>
             </div>
           </div>
@@ -54,7 +91,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
                 <path d="m16 16 4 4" stroke="currentColor" strokeLinecap="round" strokeWidth="1.8" />
               </svg>
               <label className="sr-only" htmlFor="mobile-search">Search ads</label>
-              <input autoComplete="off" className="h-10 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-slate-500" id="mobile-search" name="q" placeholder="Search mobiles, furniture, more..." />
+              <input autoComplete="off" className="h-10 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-slate-500" id="mobile-search" name="q" placeholder={copy.searchPlaceholder} />
               <button aria-label="Search" className="grid size-8 shrink-0 place-items-center rounded-lg bg-emerald-700 text-white" type="submit">
                 <svg aria-hidden="true" fill="none" height="16" viewBox="0 0 24 24" width="16">
                   <circle cx="10.8" cy="10.8" r="6.8" stroke="currentColor" strokeWidth="1.8" />
@@ -69,33 +106,33 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
           <div className="mx-auto grid max-w-7xl gap-10 px-4 py-10 sm:px-6 md:grid-cols-[1.4fr_1fr_1fr_1fr] lg:px-8 lg:py-14">
             <div>
               <Link className="text-xl font-extrabold tracking-tight text-slate-950" href="/">Turn<span className="text-emerald-700">Over</span></Link>
-              <p className="mt-3 max-w-xs text-sm leading-6 text-slate-500">Good finds, good people. Making it easier to buy and sell, wherever you are in Bangladesh.</p>
+              <p className="mt-3 max-w-xs text-sm leading-6 text-slate-500">Good finds, good people. {copy.footerText}</p>
             </div>
             <div>
-              <h2 className="text-sm font-bold text-slate-900">Explore</h2>
+              <h2 className="text-sm font-bold text-slate-900">{copy.explore}</h2>
               <ul className="mt-4 space-y-3 text-sm text-slate-500">
-                <li>                <Link className="hover:text-emerald-800" href="/#categories-heading">All categories</Link></li>
-                <li><Link className="hover:text-emerald-800" href="/#featured-heading">Featured ads</Link></li>
-                <li><Link className="hover:text-emerald-800" href="/#latest">Latest listings</Link></li>
+                <li><Link className="hover:text-emerald-800" href="/#categories-heading">{copy.allCategories}</Link></li>
+                <li><Link className="hover:text-emerald-800" href="/#featured-heading">{copy.featuredAds}</Link></li>
+                <li><Link className="hover:text-emerald-800" href="/#latest">{copy.latestListings}</Link></li>
               </ul>
             </div>
             <div>
-              <h2 className="text-sm font-bold text-slate-900">For sellers</h2>
+              <h2 className="text-sm font-bold text-slate-900">{copy.seller}</h2>
               <ul className="mt-4 space-y-3 text-sm text-slate-500">
                 <li><Link className="hover:text-emerald-800" href="/post">Post an ad</Link></li>
-                <li><Link className="hover:text-emerald-800" href="/post">Selling safely</Link></li>
-                <li><Link className="hover:text-emerald-800" href="/#sell">Help & support</Link></li>
+                <li><Link className="hover:text-emerald-800" href="/post">{copy.selling}</Link></li>
+                <li><Link className="hover:text-emerald-800" href="/#sell">{copy.help}</Link></li>
               </ul>
             </div>
             <div>
-              <h2 className="text-sm font-bold text-slate-900">A safer marketplace</h2>
-              <p className="mt-4 text-sm leading-6 text-slate-500">Meet in a public place. Check your item before you pay. Never share your one-time password.</p>
+              <h2 className="text-sm font-bold text-slate-900">{copy.safety}</h2>
+              <p className="mt-4 text-sm leading-6 text-slate-500">{copy.safetyText}</p>
             </div>
           </div>
           <div className="border-t border-slate-100">
             <div className="mx-auto flex max-w-7xl flex-col gap-2 px-4 py-4 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between sm:px-6 lg:px-8">
               <span>© {new Date().getFullYear()} TurnOver. Built for Bangladesh.</span>
-              <span>Buy local. Sell with confidence.</span>
+              <span>{copy.safe}</span>
             </div>
           </div>
         </footer>

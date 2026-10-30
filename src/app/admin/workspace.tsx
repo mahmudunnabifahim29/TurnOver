@@ -104,9 +104,11 @@ function StatCard({ label, value, note }: { label: string; value: number; note: 
 export default function AdminWorkspace({
   initialTab = "overview",
   workspacePath = "/admin",
+  requiredRole = "admin",
 }: {
   initialTab?: Tab;
   workspacePath?: string;
+  requiredRole?: Role;
 }) {
   const router = useRouter();
   const firebaseConfigured = isFirebaseConfigured();
@@ -122,6 +124,7 @@ export default function AdminWorkspace({
   const [counts, setCounts] = useState<Counts>({ pendingAds: 0, activeAds: 0, openIssues: 0, openReports: 0 });
   const [connectedAt, setConnectedAt] = useState("");
   const [loading, setLoading] = useState(true);
+  const [accessDenied, setAccessDenied] = useState(false);
   const [busyId, setBusyId] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -198,6 +201,7 @@ export default function AdminWorkspace({
       }
       setUser(currentUser);
       setLoading(true);
+      setAccessDenied(false);
       setError("");
       try {
         await prepareUserForMarketplace(currentUser);
@@ -209,9 +213,15 @@ export default function AdminWorkspace({
         if (roleError) throw new Error(roleError.message);
         if (data?.role !== "admin" && data?.role !== "moderator") {
           setRole(null);
+          setAccessDenied(true);
           return;
         }
         const currentRole = data.role;
+        if (currentRole !== requiredRole) {
+          setRole(null);
+          setAccessDenied(true);
+          return;
+        }
         setRole(currentRole);
         await loadWorkspace(currentRole);
       } catch (caught) {
@@ -224,7 +234,7 @@ export default function AdminWorkspace({
       active = false;
       unsubscribe();
     };
-  }, [firebaseConfigured, loadWorkspace, router, workspacePath]);
+  }, [firebaseConfigured, loadWorkspace, requiredRole, router, workspacePath]);
 
   async function refresh() {
     if (!role) return;
@@ -438,6 +448,21 @@ export default function AdminWorkspace({
     return <main className="mx-auto min-h-[65vh] max-w-7xl px-4 py-16 text-center text-sm text-slate-600 sm:px-6 lg:px-8">Checking your secure TurnOver workspace access…</main>;
   }
 
+  if (accessDenied) {
+    return (
+      <main className="mx-auto min-h-[65vh] max-w-3xl px-4 py-16 sm:px-6">
+        <Panel>
+          <h1 className="text-xl font-bold text-slate-950">{requiredRole === "admin" ? "Administrator access required" : "Moderator access required"}</h1>
+          <p className="mt-3 text-sm leading-6 text-slate-600">
+            {requiredRole === "admin"
+              ? "This private admin console is available only to administrators. Moderators can use the separate moderation page."
+              : "This review workspace is available only to moderators. Administrators can review listings from the admin console."}
+          </p>
+        </Panel>
+      </main>
+    );
+  }
+
   if (error && !role) {
     return (
       <main className="mx-auto min-h-[65vh] max-w-3xl px-4 py-16 sm:px-6">
@@ -480,7 +505,7 @@ export default function AdminWorkspace({
           <PageTitle
             description="Review listings, track site issues, and keep the marketplace trustworthy."
             eyebrow={role === "admin" ? "Administrator" : "Moderator"}
-            title="TurnOver operations"
+            title={role === "admin" ? "Administrator console" : "Moderator review"}
           />
           <div className="flex items-center gap-3">
             <span className="max-w-48 truncate text-xs text-slate-500">{user?.email}</span>

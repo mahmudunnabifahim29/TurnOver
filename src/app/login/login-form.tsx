@@ -1,13 +1,35 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
-import { GoogleAuthProvider, onAuthStateChanged, sendSignInLinkToEmail, signInWithEmailLink, signInWithPopup, signOut, type User } from "@firebase/auth";
+import { getRedirectResult, GoogleAuthProvider, onAuthStateChanged, sendSignInLinkToEmail, signInWithEmailLink, signInWithPopup, signInWithRedirect, signOut, type User } from "@firebase/auth";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/client";
 import { prepareUserForMarketplace } from "@/lib/firebase/prepare-user";
 
 function messageForError(error: unknown): string {
+  if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") {
+    switch (error.code) {
+      case "auth/operation-not-allowed":
+        return "Google sign-in is not enabled for this Firebase project yet. Enable Google under Firebase Authentication → Sign-in method.";
+      case "auth/unauthorized-domain":
+        return "This website domain is not authorized in Firebase Authentication. Add it under Authentication → Settings → Authorized domains.";
+      case "auth/popup-blocked":
+        return "Your browser blocked the Google sign-in window. Allow pop-ups for this site and try again.";
+      case "auth/popup-closed-by-user":
+        return "The Google sign-in window was closed before sign-in finished. You can try again.";
+      case "auth/account-exists-with-different-credential":
+        return "An account already exists with this email. Sign in using the provider you originally used.";
+      case "auth/cancelled-popup-request":
+        return "A Google sign-in attempt is already open. Finish that window or close it before trying again.";
+    }
+  }
   return error instanceof Error ? error.message : "Something went wrong. Please try again.";
+}
+
+function getAuthErrorCode(error: unknown): string | null {
+  return typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+    ? error.code
+    : null;
 }
 
 export default function LoginForm() {
@@ -32,6 +54,25 @@ export default function LoginForm() {
     });
   }, [configured]);
 
+  useEffect(() => {
+    if (!configured || window.sessionStorage.getItem("turnover-google-redirect") !== "pending") return;
+    let active = true;
+    window.sessionStorage.removeItem("turnover-google-redirect");
+    getRedirectResult(getFirebaseAuth())
+      .then(async (result) => {
+        if (!result || !active) return;
+        setUser(result.user);
+        await prepareUserForMarketplace(result.user);
+        if (active) router.replace(nextPath);
+      })
+      .catch((caught: unknown) => {
+        if (active) setError(messageForError(caught));
+      });
+    return () => {
+      active = false;
+    };
+  }, [configured, nextPath, router]);
+
   async function signInWithGoogle() {
     setBusy(true);
     setError("");
@@ -40,10 +81,23 @@ export default function LoginForm() {
       if (!configured) throw new Error("Firebase is not configured. Copy .env.example to .env.local and restart the app.");
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: "select_account" });
-      const signedIn = await signInWithPopup(getFirebaseAuth(), provider);
+      const auth = getFirebaseAuth();
+      const signedIn = await signInWithPopup(auth, provider);
+      setUser(signedIn.user);
       await prepareUserForMarketplace(signedIn.user);
       router.replace(nextPath);
     } catch (caught) {
+      if (getAuthErrorCode(caught) === "auth/popup-blocked") {
+        try {
+          window.sessionStorage.setItem("turnover-google-redirect", "pending");
+          await signInWithRedirect(getFirebaseAuth(), new GoogleAuthProvider());
+          return;
+        } catch (redirectError) {
+          window.sessionStorage.removeItem("turnover-google-redirect");
+          setError(messageForError(redirectError));
+          return;
+        }
+      }
       setError(messageForError(caught));
     } finally {
       setBusy(false);
@@ -64,6 +118,7 @@ export default function LoginForm() {
       if (isLink) {
         const signedIn = await signInWithEmailLink(auth, normalizedEmail, window.location.href);
         window.localStorage.removeItem("turnover-signin-email");
+        setUser(signedIn.user);
         await prepareUserForMarketplace(signedIn.user);
         router.replace(nextPath);
         return;
@@ -115,7 +170,7 @@ export default function LoginForm() {
             {isLink ? "Finish signing in" : "Welcome to TurnOver"}
           </h1>
           <p className="mt-3 max-w-md text-sm leading-6 text-slate-600">
-            Sign in or create your account with Google, or use a secure one-time email link. No password to remember.
+            New here or returning? Continue with Google or use a one-time email link. First-time sign-in creates your account automatically.
           </p>
 
           {user ? (
@@ -123,11 +178,13 @@ export default function LoginForm() {
               <p className="rounded-xl bg-emerald-50 p-4 text-sm text-emerald-950">
                 Signed in as <span className="font-semibold">{user.email}</span>.
               </p>
+              {error && <p aria-live="assertive" className="rounded-xl bg-rose-50 p-3 text-sm leading-6 text-rose-800">{error}</p>}
               <button className="min-h-12 w-full rounded-xl bg-emerald-700 px-5 text-sm font-bold text-white hover:bg-emerald-800 disabled:opacity-60" disabled={busy} onClick={finishMarketplaceSetup} type="button">
                 {busy ? "Connecting your account…" : "Continue to TurnOver"}
               </button>
+              <p className="text-center text-xs leading-5 text-slate-500">First time here? Google sign-in creates your account automatically.</p>
               <button className="w-full py-2 text-sm font-semibold text-slate-600 hover:text-slate-900" onClick={leaveAccount} type="button">
-                Sign out
+                Use another account
               </button>
             </div>
           ) : (
@@ -146,7 +203,7 @@ export default function LoginForm() {
                     <path fill="#FBBC05" d="M10.53 28.59A14.4 14.4 0 0 1 9.75 24c0-1.59.27-3.13.76-4.59l-7.98-6.19A23.9 23.9 0 0 0 0 24c0 3.87.93 7.53 2.56 10.78l7.97-6.19Z" />
                     <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.91-5.8l-7.73-6c-2.14 1.44-4.89 2.3-8.18 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48Z" />
                   </svg>
-                  Continue with Google
+                  Continue with Google to sign up or log in
                 </button>
                 <div className="flex items-center gap-3 text-xs font-medium text-slate-400">
                   <span className="h-px flex-1 bg-slate-200" />
@@ -173,7 +230,6 @@ export default function LoginForm() {
             </>
           )}
 
-          {user && error && <p aria-live="assertive" className="mt-4 rounded-xl bg-rose-50 p-3 text-sm leading-6 text-rose-800">{error}</p>}
           <p className="mt-6 text-xs leading-5 text-slate-500">
             By continuing, you agree to use TurnOver safely and honestly. Your email link verifies control of your inbox.
           </p>
