@@ -5,21 +5,12 @@ Read TURNOVER-SETUP.md first for beginner setup instructions. Paths below are re
 ## .env.example
 
 ```text
-# Supabase dashboard > Project Settings > API / API Keys.
-NEXT_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co
-NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=YOUR_PUBLISHABLE_KEY
-NEXT_PUBLIC_SITE_URL=http://localhost:3000
-# Never place a secret/service-role key in a NEXT_PUBLIC_ variable.
-
 # Firebase Web app configuration (public client configuration, not a service-account key).
 # Restrict the Firebase API key to the Identity Toolkit API and your site referrers in Google Cloud.
-NEXT_PUBLIC_FIREBASE_API_KEY=AIzaSyDC_vMbNNhHS_60_EtZQWzxJsQZTQDAOxg
-NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=turnover-d5a51.firebaseapp.com
-NEXT_PUBLIC_FIREBASE_PROJECT_ID=turnover-d5a51
-NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=turnover-d5a51.firebasestorage.app
-NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=502498643792
-NEXT_PUBLIC_FIREBASE_APP_ID=1:502498643792:web:9701374c08db0c22766655
-NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID=G-ECF1B6RZGF
+NEXT_PUBLIC_FIREBASE_API_KEY=AIzaSyAPw0TNs0jVHpF9LCF0jeg8k95YhDQQono
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=turnover-f8f7d.firebaseapp.com
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=turnover-f8f7d
+NEXT_PUBLIC_FIREBASE_APP_ID=1:861741763066:web:f0f23e516a9e770da7bc43
 ```
 
 ## .firebaserc
@@ -27,7 +18,7 @@ NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID=G-ECF1B6RZGF
 ```text
 {
   "projects": {
-    "default": "turnover-d5a51"
+    "default": "turnover-f8f7d"
   }
 }
 ```
@@ -37,13 +28,13 @@ NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID=G-ECF1B6RZGF
 ```text
 node_modules/
 .next/
+.open-next/
+.wrangler/
 out/
 .env*
 !.env.example
 *.tsbuildinfo
 .DS_Store
-.vercel/
-supabase/.temp/
 functions/node_modules/
 .firebase/
 firebase-debug.log
@@ -54,6 +45,10 @@ firestore-debug.log
 
 ```json
 {
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
   "functions": [
     {
       "source": "functions",
@@ -72,10 +67,15 @@ firestore-debug.log
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22.0.0" },
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "dev": "next dev --webpack",
     "build": "next build --webpack",
+    "build:cloudflare": "opennextjs-cloudflare build",
+    "preview:cloudflare": "opennextjs-cloudflare preview",
+    "deploy:cloudflare": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
     "start": "next start",
     "typecheck": "next typegen && tsc --noEmit",
     "lint": "eslint .",
@@ -83,10 +83,12 @@ firestore-debug.log
     "docs:code": "node scripts/export-code.mjs"
   },
   "dependencies": {
-    "@supabase/supabase-js": "2.118.0",
     "@firebase/app": "0.16.2",
     "@firebase/auth": "1.13.6",
+    "@firebase/firestore": "4.13.0",
     "@firebase/functions": "0.13.4",
+    "@opennextjs/cloudflare": "1.20.15",
+    "jose": "6.2.14",
     "next": "16.4.3",
     "react": "19.3.1",
     "react-dom": "19.3.1",
@@ -100,7 +102,14 @@ firestore-debug.log
     "eslint": "^9.0.0",
     "eslint-config-next": "16.4.3",
     "tailwindcss": "4.3.3",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "wrangler": "^4.156.0"
+  },
+  "overrides": {
+    "@grpc/grpc-js": "^1.13.6",
+    "@node-minify/core": {
+      "glob": "^10.4.6"
+    }
   }
 }
 ```
@@ -136,8 +145,8 @@ firestore-debug.log
 ```typescript
 /// <reference types="next" />
 /// <reference types="next/image-types/global" />
-import "./.next/types/routes.d.ts";
-import "./.next/types/root-params.d.ts";
+import "./.next/dev/types/routes.d.ts";
+import "./.next/dev/types/root-params.d.ts";
 
 // NOTE: This file should not be edited
 // see https://nextjs.org/docs/app/api-reference/config/typescript for more information.
@@ -146,7 +155,10 @@ import "./.next/types/root-params.d.ts";
 ## next.config.ts
 
 ```typescript
+import { initOpenNextCloudflareForDev } from "@opennextjs/cloudflare";
 import type { NextConfig } from "next";
+
+initOpenNextCloudflareForDev();
 
 const nextConfig: NextConfig = { poweredByHeader: false };
 export default nextConfig;
@@ -168,8 +180,184 @@ import nextTypescript from "eslint-config-next/typescript";
 export default defineConfig([
   ...nextVitals,
   ...nextTypescript,
-  globalIgnores([".next/**", "out/**", "next-env.d.ts"]),
+  globalIgnores([".next/**", ".open-next/**", ".wrangler/**", "out/**", "next-env.d.ts"]),
 ]);
+```
+
+## firestore.rules
+
+```text
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn() && request.auth.token.role == 'admin';
+    }
+
+    function isStaff() {
+      return signedIn() && request.auth.token.role in ['admin', 'moderator'];
+    }
+
+    function isListingOwner() {
+      return signedIn() && resource.data.seller_id == request.auth.uid;
+    }
+
+    match /ads/{adId} {
+      allow get, list: if resource.data.status == 'active' || isStaff() || isListingOwner();
+
+      allow create: if signedIn()
+        && request.auth.token.email_verified == true
+        && request.resource.data.seller_id == request.auth.uid
+        && request.resource.data.title is string
+        && request.resource.data.title.size() >= 4
+        && request.resource.data.title.size() <= 140
+        && request.resource.data.description is string
+        && request.resource.data.description.size() <= 4000
+        && request.resource.data.price is number
+        && request.resource.data.price >= 0
+        && request.resource.data.negotiable is bool
+        && request.resource.data.status == 'draft'
+        && request.resource.data.images is list
+        && request.resource.data.images.size() == 0
+        && request.resource.data.keys().hasOnly([
+          'seller_id', 'seller_display_name', 'category_id', 'category_name_en',
+          'location_id', 'location_name_en', 'title', 'description', 'price',
+          'negotiable', 'condition', 'status', 'images', 'created_at', 'updated_at'
+        ]);
+
+      allow update: if isAdmin()
+        || (isStaff()
+          && resource.data.status == 'pending'
+          && request.resource.data.status in ['active', 'rejected']
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updated_at']))
+        || (signedIn()
+          && request.auth.token.email_verified == true
+          && resource.data.seller_id == request.auth.uid
+          && resource.data.status == 'draft'
+          && request.resource.data.status == 'pending'
+          && request.resource.data.images is list
+          && request.resource.data.images.size() > 0
+          && request.resource.data.images.size() <= 8
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'images', 'updated_at']));
+
+      allow delete: if isAdmin()
+        || (signedIn() && resource.data.seller_id == request.auth.uid && resource.data.status == 'draft');
+    }
+
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /locations/{locationId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /users/{userId} {
+      allow read, write: if false;
+    }
+
+    match /site_issues/{issueId} {
+      allow read: if isStaff();
+      allow create: if signedIn()
+        && request.resource.data.reporter_id == request.auth.uid
+        && request.resource.data.title is string
+        && request.resource.data.title.size() >= 4
+        && request.resource.data.title.size() <= 140
+        && request.resource.data.details is string
+        && request.resource.data.details.size() >= 10
+        && request.resource.data.details.size() <= 4000
+        && request.resource.data.page_path is string
+        && request.resource.data.page_path.size() <= 500
+        && request.resource.data.severity in ['low', 'medium', 'high', 'critical']
+        && request.resource.data.status == 'open'
+        && request.resource.data.keys().hasOnly([
+          'reporter_id', 'title', 'details', 'page_path', 'severity',
+          'status', 'created_at', 'updated_at'
+        ]);
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updated_at'])
+        && request.resource.data.status in ['in_progress', 'resolved'];
+      allow delete: if isAdmin();
+    }
+
+    match /reports/{reportId} {
+      allow read: if isAdmin();
+      allow create: if signedIn()
+        && request.resource.data.reporter_id == request.auth.uid
+        && request.resource.data.ad_id is string
+        && request.resource.data.reason is string
+        && request.resource.data.reason.size() <= 140
+        && request.resource.data.details is string
+        && request.resource.data.details.size() <= 4000
+        && request.resource.data.resolved == false
+        && request.resource.data.keys().hasOnly([
+          'reporter_id', 'ad_id', 'ad_title', 'reason', 'details',
+          'resolved', 'created_at', 'updated_at'
+        ]);
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['resolved', 'updated_at'])
+        && request.resource.data.resolved == true;
+      allow delete: if isAdmin();
+    }
+  }
+}
+```
+
+## firestore.indexes.json
+
+```json
+{
+  "indexes": [
+    {
+      "collectionGroup": "ads",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
+```
+
+## open-next.config.ts
+
+```typescript
+import { defineCloudflareConfig } from "@opennextjs/cloudflare";
+
+export default defineCloudflareConfig();
+```
+
+## wrangler.jsonc
+
+```text
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "turnover",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2026-10-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "r2_buckets": [
+    {
+      "binding": "LISTING_IMAGES",
+      "bucket_name": "turnover-listing-images"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
 ```
 
 ## scripts/export-code.mjs
@@ -183,7 +371,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const fixed = [
   ".env.example", ".firebaserc", ".gitignore", "firebase.json", "package.json",
   "tsconfig.json", "next-env.d.ts", "next.config.ts", "postcss.config.mjs",
-  "eslint.config.mjs", "scripts/export-code.mjs", "functions/package.json", "functions/index.js",
+  "eslint.config.mjs", "firestore.rules", "firestore.indexes.json", "open-next.config.ts",
+  "wrangler.jsonc", "scripts/export-code.mjs", "functions/package.json", "functions/index.js",
 ];
 async function walk(directory) {
   const result = [];
@@ -194,7 +383,7 @@ async function walk(directory) {
   }
   return result.sort();
 }
-const files = [...fixed, ...await walk("src"), ...await walk("supabase")];
+const files = [...fixed, ...await walk("src")];
 let output = "# TurnOver — complete application source\n\nRead TURNOVER-SETUP.md first for beginner setup instructions. Paths below are relative to TurnOver/. Create each file at its listed path and paste the entire code block. npm lockfiles are generated by the package managers and are not reproduced here. This document is generated by npm run docs:code.\n\n";
 for (const file of files) {
   const extension = path.extname(file).slice(1);
@@ -209,15 +398,15 @@ console.log(`Exported ${files.length} complete files to docs/PHASE-3-CODE.md`);
 
 ```json
 {
-  "name": "turnover-auth-bridge",
+  "name": "turnover-firebase-functions",
   "private": true,
   "type": "module",
   "main": "index.js",
   "engines": {
-    "node": "22"
+    "node": ">=22"
   },
   "scripts": {
-    "deploy": "firebase deploy --only functions:ensureSupabaseAuthenticatedRole"
+    "deploy": "firebase deploy --only functions"
   },
   "dependencies": {
     "firebase-admin": "^14.5.0",
@@ -231,26 +420,179 @@ console.log(`Exported ${files.length} complete files to docs/PHASE-3-CODE.md`);
 ```text
 import { getApps, initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
+import { getFirestore } from "firebase-admin/firestore";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
 
 if (getApps().length === 0) initializeApp();
 
-export const ensureSupabaseAuthenticatedRole = onCall(
-  { region: "asia-southeast1", maxInstances: 5 },
+const db = getFirestore();
+const auth = getAuth();
+const region = "asia-southeast1";
+const ownerEmail = "mahmudunnabifahim3579@gmail.com";
+const categories = [
+  ["mobiles", "Mobiles", "মোবাইল"],
+  ["electronics", "Electronics", "ইলেকট্রনিক্স"],
+  ["vehicles", "Vehicles", "যানবাহন"],
+  ["property", "Property", "প্রপার্টি"],
+  ["home-living", "Home & Living", "ঘর ও গৃহস্থালি"],
+  ["fashion", "Fashion", "ফ্যাশন"],
+  ["furniture", "Furniture", "আসবাবপত্র"],
+  ["jobs", "Jobs", "চাকরি"],
+  ["services", "Services", "সেবা"],
+  ["pets", "Pets", "পোষা প্রাণী"],
+  ["sports-hobbies", "Sports & Hobbies", "খেলাধুলা ও শখ"],
+  ["books-education", "Books & Education", "বই ও শিক্ষা"],
+];
+const areas = [
+  ["dhaka", "Dhaka", "ঢাকা"],
+  ["chattogram", "Chattogram", "চট্টগ্রাম"],
+  ["khulna", "Khulna", "খুলনা"],
+  ["rajshahi", "Rajshahi", "রাজশাহী"],
+  ["sylhet", "Sylhet", "সিলেট"],
+  ["barishal", "Barishal", "বরিশাল"],
+  ["rangpur", "Rangpur", "রংপুর"],
+  ["mymensingh", "Mymensingh", "ময়মনসিংহ"],
+];
+
+function requireSignedIn(request) {
+  if (!request.auth) {
+    throw new HttpsError("unauthenticated", "Sign in before using your marketplace account.");
+  }
+  return request.auth;
+}
+
+function requireAdmin(request) {
+  const caller = requireSignedIn(request);
+  if (caller.token.role !== "admin") {
+    throw new HttpsError("permission-denied", "Administrator access is required.");
+  }
+  return caller;
+}
+
+async function seedCollection(collectionName, rows) {
+  const collectionRef = db.collection(collectionName);
+  const existing = await collectionRef.limit(1).get();
+  if (!existing.empty) return;
+  const batch = db.batch();
+  for (const [id, name_en, name_bn] of rows) {
+    const ref = collectionRef.doc(id);
+    batch.set(ref, {
+      name_en,
+      name_bn,
+      ...(collectionName === "locations" ? { level: "area", parent_id: null } : { slug: id, parent_id: null }),
+    });
+  }
+  await batch.commit();
+}
+
+export const ensureMarketplaceProfile = onCall({ region, maxInstances: 10 }, async (request) => {
+  const caller = requireSignedIn(request);
+  if (caller.token.email_verified !== true || typeof caller.token.email !== "string") {
+    throw new HttpsError("failed-precondition", "Verify your email address before creating a marketplace profile.");
+  }
+
+  const user = await auth.getUser(caller.uid);
+  const profileRef = db.collection("users").doc(caller.uid);
+  const existingProfile = await profileRef.get();
+  const now = new Date().toISOString();
+  await profileRef.set({
+    email: user.email ?? caller.token.email,
+    display_name: user.displayName ?? user.email?.split("@")[0] ?? "Marketplace user",
+    role: user.customClaims?.role === "admin" || user.customClaims?.role === "moderator"
+      ? user.customClaims.role
+      : "user",
+    updated_at: now,
+    created_at: existingProfile.get("created_at") ?? now,
+  }, { merge: true });
+
+  await Promise.all([
+    seedCollection("categories", categories),
+    seedCollection("locations", areas),
+  ]);
+  return { profileReady: true };
+});
+
+export const bootstrapFirstAdmin = onCall({ region, maxInstances: 1 }, async (request) => {
+  const caller = requireSignedIn(request);
+  const user = await auth.getUser(caller.uid);
+  if (
+    caller.token.email_verified !== true ||
+    user.email?.toLowerCase() !== ownerEmail
+  ) {
+    throw new HttpsError("permission-denied", "Only the verified marketplace owner can bootstrap administration.");
+  }
+
+  const profileRef = db.collection("users").doc(user.uid);
+  const bootstrapRef = db.collection("system").doc("admin_bootstrap");
+  await db.runTransaction(async (transaction) => {
+    const bootstrap = await transaction.get(bootstrapRef);
+    const bootstrapOwner = bootstrap.get("admin_uid");
+    if (bootstrapOwner && bootstrapOwner !== user.uid) {
+      throw new HttpsError("failed-precondition", "An administrator has already been set up.");
+    }
+    const admins = await transaction.get(db.collection("users").where("role", "==", "admin").limit(2));
+    if (admins.docs.some((admin) => admin.id !== user.uid)) {
+      throw new HttpsError("failed-precondition", "An administrator has already been set up.");
+    }
+    transaction.set(bootstrapRef, {
+      admin_uid: user.uid,
+      created_at: bootstrap.get("created_at") ?? new Date().toISOString(),
+    }, { merge: true });
+    transaction.set(profileRef, {
+      email: user.email,
+      display_name: user.displayName ?? user.email,
+      role: "admin",
+      updated_at: new Date().toISOString(),
+    }, { merge: true });
+  });
+
+  await auth.setCustomUserClaims(user.uid, { ...user.customClaims, role: "admin" });
+  return { role: "admin" };
+});
+
+export const adminListMarketplaceUsers = onCall({ region, maxInstances: 5 }, async (request) => {
+  requireAdmin(request);
+  const result = await auth.listUsers(1000);
+  const profiles = await db.collection("users").get();
+  const profileById = new Map(profiles.docs.map((profile) => [profile.id, profile.data()]));
+  return result.users.map((user) => {
+    const profile = profileById.get(user.uid);
+    const role = user.customClaims?.role;
+    return {
+      user_id: user.uid,
+      email: user.email ?? "",
+      display_name: user.displayName ?? String(profile?.display_name ?? ""),
+      role: role === "admin" || role === "moderator" ? role : "user",
+    };
+  });
+});
+
+export const setModeratorAccess = onCall(
+  { region, maxInstances: 5 },
   async (request) => {
-    if (!request.auth) {
-      throw new HttpsError("unauthenticated", "Sign in before connecting your marketplace account.");
+    requireAdmin(request);
+    const targetUserId = request.data?.target_user_id;
+    const enabled = request.data?.enabled;
+    if (typeof targetUserId !== "string" || !targetUserId || typeof enabled !== "boolean") {
+      throw new HttpsError("invalid-argument", "Choose a user and whether moderator access should be enabled.");
     }
 
-    const auth = getAuth();
-    const user = await auth.getUser(request.auth.uid);
-    if (user.customClaims?.role !== "authenticated") {
-      await auth.setCustomUserClaims(user.uid, {
-        ...user.customClaims,
-        role: "authenticated",
-      });
+    const target = await auth.getUser(targetUserId);
+    if (target.email?.toLowerCase() === ownerEmail || target.customClaims?.role === "admin") {
+      throw new HttpsError("failed-precondition", "Administrator access cannot be changed here.");
     }
-    return { connected: true };
+    const claims = { ...target.customClaims };
+    if (enabled) claims.role = "moderator";
+    else if (claims.role === "moderator") delete claims.role;
+
+    await auth.setCustomUserClaims(target.uid, claims);
+    await db.collection("users").doc(target.uid).set({
+      email: target.email ?? "",
+      display_name: target.displayName ?? target.email?.split("@")[0] ?? "Marketplace user",
+      role: enabled ? "moderator" : "user",
+      updated_at: new Date().toISOString(),
+    }, { merge: true });
+    return { role: enabled ? "moderator" : "user" };
   },
 );
 ```
@@ -277,13 +619,14 @@ export default function AdminPage() {
 ```tsx
 "use client";
 
-import { onAuthStateChanged, type User } from "@firebase/auth";
+import { getIdTokenResult, onAuthStateChanged, type User } from "@firebase/auth";
+import { httpsCallable } from "@firebase/functions";
+import Image from "next/image";
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { formatBDT } from "@/lib/format";
-import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/client";
+import { getFirebaseAuth, getFirebaseDb, getFirebaseFunctions, isFirebaseConfigured } from "@/lib/firebase/client";
 import { prepareUserForMarketplace } from "@/lib/firebase/prepare-user";
-import { createClient } from "@/lib/supabase/client";
 
 type Role = "admin" | "moderator";
 type Tab = "overview" | "ads" | "products" | "categories" | "issues" | "reports" | "users";
@@ -296,7 +639,7 @@ type AdRow = {
   price: number;
   condition: string;
   created_at: string;
-  photos?: { storage_path: string; position: number }[] | null;
+  images?: { key: string; position: number }[] | null;
   photoUrl?: string | null;
   category: { name_en: string }[] | null;
   location: { name_en: string }[] | null;
@@ -338,11 +681,39 @@ type CategoryRow = {
 };
 
 type Counts = { pendingAds: number; activeAds: number; openIssues: number; openReports: number };
+type FirestoreRow = Record<string, unknown>;
 
 const dateFormatter = new Intl.DateTimeFormat("en-BD", { dateStyle: "medium", timeStyle: "short" });
+const ownerEmail = "mahmudunnabifahim3579@gmail.com";
 
 function messageForError(error: unknown): string {
   return error instanceof Error ? error.message : "Something went wrong. Please try again.";
+}
+
+function toAdRow(id: string, value: FirestoreRow): AdRow {
+  const images = Array.isArray(value.images)
+    ? value.images.filter((image): image is { key: string; position: number } =>
+      typeof image === "object" && image !== null &&
+      "key" in image && typeof image.key === "string" &&
+      "position" in image && typeof image.position === "number")
+    : [];
+  return {
+    id,
+    title: String(value.title ?? ""),
+    description: String(value.description ?? ""),
+    status: String(value.status ?? "draft"),
+    price: Number(value.price ?? 0),
+    condition: String(value.condition ?? "used"),
+    created_at: String(value.created_at ?? new Date(0).toISOString()),
+    images,
+    category: [{ name_en: String(value.category_name_en ?? "Marketplace") }],
+    location: [{ name_en: String(value.location_name_en ?? "Bangladesh") }],
+    seller: [{ display_name: String(value.seller_display_name ?? "Seller") }],
+  };
+}
+
+function listingImageUrl(key: string): string {
+  return `/api/listing-images/${key.split("/").map(encodeURIComponent).join("/")}`;
 }
 
 function Panel({ children, className = "" }: { children: ReactNode; className?: string }) {
@@ -354,6 +725,49 @@ function EmptyState({ title, text }: { title: string; text: string }) {
     <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-5 py-10 text-center">
       <p className="font-semibold text-slate-900">{title}</p>
       <p className="mt-2 text-sm leading-6 text-slate-600">{text}</p>
+    </div>
+  );
+}
+
+function StaffListingPhoto({ url, title }: { url: string; title: string }) {
+  const [source, setSource] = useState("");
+  const [loadError, setLoadError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl = "";
+    const controller = new AbortController();
+    async function loadPhoto() {
+      try {
+        const currentUser = getFirebaseAuth().currentUser;
+        if (!currentUser) throw new Error("Sign in to view this private listing photo.");
+        const token = await currentUser.getIdToken();
+        const response = await fetch(url, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`Could not load listing photo (${response.status}).`);
+        objectUrl = URL.createObjectURL(await response.blob());
+        if (active) setSource(objectUrl);
+      } catch (caught) {
+        if (active && !controller.signal.aborted) {
+          setLoadError(caught instanceof Error ? caught.message : "Could not load listing photo.");
+        }
+      }
+    }
+    void loadPhoto();
+    return () => {
+      active = false;
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [url]);
+
+  return (
+    <div className="flex aspect-[4/3] w-full shrink-0 items-center justify-center overflow-hidden rounded-xl bg-slate-100 sm:w-44">
+      {source
+        ? <Image alt={`Photo of ${title}`} className="h-full w-full object-cover" height={300} src={source} unoptimized width={400} />
+        : <span className="px-3 text-center text-xs text-slate-500">{loadError || "Loading private photo…"}</span>}
     </div>
   );
 }
@@ -401,6 +815,7 @@ export default function AdminWorkspace({
   const [counts, setCounts] = useState<Counts>({ pendingAds: 0, activeAds: 0, openIssues: 0, openReports: 0 });
   const [connectedAt, setConnectedAt] = useState("");
   const [loading, setLoading] = useState(true);
+  const [bootstrapping, setBootstrapping] = useState(false);
   const [accessDenied, setAccessDenied] = useState(false);
   const [busyId, setBusyId] = useState("");
   const [notice, setNotice] = useState("");
@@ -408,56 +823,65 @@ export default function AdminWorkspace({
 
   const loadWorkspace = useCallback(async (currentRole: Role) => {
     setError("");
-    const supabase = createClient();
+    const firestore = await import("@firebase/firestore");
+    const db = await getFirebaseDb();
     const [adsResult, issuesResult, pendingCount, activeCount, issueCount] = await Promise.all([
-      supabase.from("ads")
-        .select("id,title,description,status,price,condition,created_at,category:categories(name_en),location:locations(name_en),seller:profiles(display_name),photos:ad_images(storage_path,position)")
-        .eq("status", "pending")
-        .order("created_at", { ascending: true })
-        .limit(50),
-      supabase.from("site_issues").select("id,title,details,page_path,severity,status,created_at").order("created_at", { ascending: false }).limit(50),
-      supabase.from("ads").select("id", { count: "exact", head: true }).eq("status", "pending"),
-      supabase.from("ads").select("id", { count: "exact", head: true }).eq("status", "active"),
-      supabase.from("site_issues").select("id", { count: "exact", head: true }).neq("status", "resolved"),
+      firestore.getDocs(firestore.query(firestore.collection(db, "ads"), firestore.where("status", "==", "pending"), firestore.limit(50))),
+      firestore.getDocs(firestore.query(firestore.collection(db, "site_issues"), firestore.limit(50))),
+      firestore.getCountFromServer(firestore.query(firestore.collection(db, "ads"), firestore.where("status", "==", "pending"))),
+      firestore.getCountFromServer(firestore.query(firestore.collection(db, "ads"), firestore.where("status", "==", "active"))),
+      firestore.getCountFromServer(firestore.query(firestore.collection(db, "site_issues"), firestore.where("status", "!=", "resolved"))),
     ]);
-    const firstError = adsResult.error ?? issuesResult.error ?? pendingCount.error ?? activeCount.error ?? issueCount.error;
-    if (firstError) throw new Error(firstError.message);
-    const adsWithPhotos = await Promise.all((adsResult.data ?? []).map(async (ad) => {
-      const photo = [...(ad.photos ?? [])].sort((a, b) => a.position - b.position)[0];
-      if (!photo) throw new Error(`Pending listing "${ad.title}" has no photo to review.`);
-      const { data: signedPhoto, error: photoError } = await supabase.storage
-        .from("ad-images")
-        .createSignedUrl(photo.storage_path, 3600);
-      if (photoError) throw new Error(`Could not load a review photo: ${photoError.message}`);
-      return { ...ad, photoUrl: signedPhoto.signedUrl };
-    }));
+    const adsWithPhotos = adsResult.docs.map((snapshot) => {
+      const ad = toAdRow(snapshot.id, snapshot.data());
+      const firstImage = [...(ad.images ?? [])].sort((a, b) => a.position - b.position)[0];
+      if (!firstImage) throw new Error(`Pending listing "${ad.title}" has no photo to review.`);
+      ad.photoUrl = listingImageUrl(firstImage.key);
+      return ad;
+    }).sort((a, b) => a.created_at.localeCompare(b.created_at));
     setAds(adsWithPhotos);
-    setIssues(issuesResult.data ?? []);
+    setIssues(issuesResult.docs.map((snapshot) => ({ id: snapshot.id, ...snapshot.data() }) as IssueRow)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at)));
     setCounts({
-      pendingAds: pendingCount.count ?? 0,
-      activeAds: activeCount.count ?? 0,
-      openIssues: issueCount.count ?? 0,
+      pendingAds: pendingCount.data().count,
+      activeAds: activeCount.data().count,
+      openIssues: issueCount.data().count,
       openReports: 0,
     });
 
     if (currentRole === "admin") {
+      const listUsers = httpsCallable<void, UserRow[]>(getFirebaseFunctions(), "adminListMarketplaceUsers");
       const [reportResult, reportCount, userResult, productResult, categoryResult] = await Promise.all([
-        supabase.from("reports").select("id,reason,details,resolved,created_at,ad:ads(title)").eq("resolved", false).order("created_at", { ascending: false }).limit(50),
-        supabase.from("reports").select("id", { count: "exact", head: true }).eq("resolved", false),
-        supabase.rpc("admin_list_users"),
-        supabase.from("ads")
-          .select("id,title,status,price,condition,created_at,category:categories(name_en),location:locations(name_en),seller:profiles(display_name)")
-          .order("created_at", { ascending: false })
-          .limit(100),
-        supabase.from("categories").select("id,slug,name_en,name_bn,parent_id").order("sort_order").order("name_en"),
+        firestore.getDocs(firestore.query(firestore.collection(db, "reports"), firestore.where("resolved", "==", false), firestore.limit(50))),
+        firestore.getCountFromServer(firestore.query(firestore.collection(db, "reports"), firestore.where("resolved", "==", false))),
+        listUsers(),
+        firestore.getDocs(firestore.query(firestore.collection(db, "ads"), firestore.limit(100))),
+        firestore.getDocs(firestore.query(firestore.collection(db, "categories"), firestore.limit(100))),
       ]);
-      const adminError = reportResult.error ?? reportCount.error ?? userResult.error ?? productResult.error ?? categoryResult.error;
-      if (adminError) throw new Error(adminError.message);
-      setReports(reportResult.data ?? []);
-      setUsers(userResult.data ?? []);
-      setProducts(productResult.data ?? []);
-      setCategories(categoryResult.data ?? []);
-      setCounts((current) => ({ ...current, openReports: reportCount.count ?? 0 }));
+      setReports(reportResult.docs.map((snapshot) => {
+        const value = snapshot.data();
+        return {
+          id: snapshot.id,
+          reason: String(value.reason ?? ""),
+          details: String(value.details ?? ""),
+          resolved: Boolean(value.resolved),
+          created_at: String(value.created_at ?? ""),
+          ad: [{ title: String(value.ad_title ?? "Listing") }],
+        };
+      }).sort((a, b) => b.created_at.localeCompare(a.created_at)));
+      setUsers(userResult.data);
+      setProducts(productResult.docs.map((snapshot) => toAdRow(snapshot.id, snapshot.data())));
+      setCategories(categoryResult.docs.map((snapshot) => {
+        const value = snapshot.data();
+        return {
+          id: snapshot.id,
+          slug: snapshot.id,
+          name_en: String(value.name_en ?? snapshot.id),
+          name_bn: String(value.name_bn ?? ""),
+          parent_id: typeof value.parent_id === "string" ? value.parent_id : null,
+        };
+      }));
+      setCounts((current) => ({ ...current, openReports: reportCount.data().count }));
     } else {
       setReports([]);
       setUsers([]);
@@ -482,18 +906,13 @@ export default function AdminWorkspace({
       setError("");
       try {
         await prepareUserForMarketplace(currentUser);
-        const { data, error: roleError } = await createClient()
-          .from("user_roles")
-          .select("role")
-          .eq("user_id", currentUser.uid)
-          .maybeSingle();
-        if (roleError) throw new Error(roleError.message);
-        if (data?.role !== "admin" && data?.role !== "moderator") {
+        const token = await getIdTokenResult(currentUser, true);
+        const currentRole = token.claims.role;
+        if (currentRole !== "admin" && currentRole !== "moderator") {
           setRole(null);
           setAccessDenied(true);
           return;
         }
-        const currentRole = data.role;
         if (currentRole !== requiredRole) {
           setRole(null);
           setAccessDenied(true);
@@ -525,20 +944,39 @@ export default function AdminWorkspace({
     }
   }
 
+  async function bootstrapFirstAdmin() {
+    if (!user || user.email?.toLowerCase() !== ownerEmail) return;
+    setBootstrapping(true);
+    setError("");
+    try {
+      const bootstrap = httpsCallable<void, { role: string }>(getFirebaseFunctions(), "bootstrapFirstAdmin");
+      await bootstrap();
+      await user.getIdToken(true);
+      setRole("admin");
+      setAccessDenied(false);
+      await loadWorkspace("admin");
+    } catch (caught) {
+      setError(messageForError(caught));
+    } finally {
+      setBootstrapping(false);
+    }
+  }
+
   async function moderateAd(adId: string, status: "active" | "rejected") {
     setBusyId(adId);
     setNotice("");
     setError("");
     try {
-      const { data, error: updateError } = await createClient()
-        .from("ads")
-        .update({ status })
-        .eq("id", adId)
-        .eq("status", "pending")
-        .select("id")
-        .maybeSingle();
-      if (updateError) throw new Error(updateError.message);
-      if (!data) throw new Error("This listing was already reviewed. Refresh the queue and try again.");
+      const firestore = await import("@firebase/firestore");
+      const db = await getFirebaseDb();
+      await firestore.runTransaction(db, async (transaction) => {
+        const adRef = firestore.doc(db, "ads", adId);
+        const ad = await transaction.get(adRef);
+        if (!ad.exists() || ad.data().status !== "pending") {
+          throw new Error("This listing was already reviewed. Refresh the queue and try again.");
+        }
+        transaction.update(adRef, { status, updated_at: new Date().toISOString() });
+      });
       setNotice(status === "active" ? "Listing approved and published." : "Listing rejected and kept private.");
       await refresh();
     } catch (caught) {
@@ -553,14 +991,9 @@ export default function AdminWorkspace({
     setNotice("");
     setError("");
     try {
-      const { data, error: updateError } = await createClient()
-        .from("site_issues")
-        .update({ status, updated_at: new Date().toISOString() })
-        .eq("id", issueId)
-        .select("id")
-        .maybeSingle();
-      if (updateError) throw new Error(updateError.message);
-      if (!data) throw new Error("This issue could not be updated. Refresh and try again.");
+      const firestore = await import("@firebase/firestore");
+      const db = await getFirebaseDb();
+      await firestore.updateDoc(firestore.doc(db, "site_issues", issueId), { status, updated_at: new Date().toISOString() });
       setNotice("Issue status updated.");
       await refresh();
     } catch (caught) {
@@ -579,14 +1012,18 @@ export default function AdminWorkspace({
     const form = event.currentTarget;
     const formData = new FormData(form);
     try {
-      const { error: insertError } = await createClient().from("site_issues").insert({
+      const firestore = await import("@firebase/firestore");
+      const db = await getFirebaseDb();
+      await firestore.addDoc(firestore.collection(db, "site_issues"), {
         reporter_id: user.uid,
         title: String(formData.get("title") ?? "").trim(),
         details: String(formData.get("details") ?? "").trim(),
         page_path: String(formData.get("page_path") ?? "/").trim() || "/",
         severity: String(formData.get("severity") ?? "medium"),
+        status: "open",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
       });
-      if (insertError) throw new Error(insertError.message);
       form.reset();
       setNotice("Bug finding submitted to the operations team.");
       await refresh();
@@ -602,15 +1039,14 @@ export default function AdminWorkspace({
     setError("");
     setNotice("");
     try {
-      const { data, error: updateError } = await createClient()
-        .from("reports")
-        .update({ resolved: true })
-        .eq("id", reportId)
-        .eq("resolved", false)
-        .select("id")
-        .maybeSingle();
-      if (updateError) throw new Error(updateError.message);
-      if (!data) throw new Error("This report has already been handled.");
+      const firestore = await import("@firebase/firestore");
+      const db = await getFirebaseDb();
+      await firestore.runTransaction(db, async (transaction) => {
+        const reportRef = firestore.doc(db, "reports", reportId);
+        const report = await transaction.get(reportRef);
+        if (!report.exists() || report.data().resolved) throw new Error("This report has already been handled.");
+        transaction.update(reportRef, { resolved: true, updated_at: new Date().toISOString() });
+      });
       setNotice("Report marked as reviewed.");
       await refresh();
     } catch (caught) {
@@ -625,11 +1061,14 @@ export default function AdminWorkspace({
     setError("");
     setNotice("");
     try {
-      const { error: rpcError } = await createClient().rpc("admin_set_moderator", {
+      const setModeratorAccess = httpsCallable<
+        { target_user_id: string; enabled: boolean },
+        { role: string }
+      >(getFirebaseFunctions(), "setModeratorAccess");
+      await setModeratorAccess({
         target_user_id: targetUser.user_id,
         enabled: targetUser.role !== "moderator",
       });
-      if (rpcError) throw new Error(rpcError.message);
       setNotice(targetUser.role === "moderator" ? "Moderator access removed." : "Moderator access granted.");
       await refresh();
     } catch (caught) {
@@ -644,15 +1083,16 @@ export default function AdminWorkspace({
     setNotice("");
     setError("");
     try {
-      const { data, error: updateError } = await createClient()
-        .from("ads")
-        .update({ status })
-        .eq("id", product.id)
-        .eq("status", product.status)
-        .select("id")
-        .maybeSingle();
-      if (updateError) throw new Error(updateError.message);
-      if (!data) throw new Error("This listing changed. Refresh the products list and try again.");
+      const firestore = await import("@firebase/firestore");
+      const db = await getFirebaseDb();
+      await firestore.runTransaction(db, async (transaction) => {
+        const productRef = firestore.doc(db, "ads", product.id);
+        const current = await transaction.get(productRef);
+        if (!current.exists() || current.data().status !== product.status) {
+          throw new Error("This listing changed. Refresh the products list and try again.");
+        }
+        transaction.update(productRef, { status, updated_at: new Date().toISOString() });
+      });
       setNotice(status === "sold" ? "Listing marked as sold." : "Listing removed from public view.");
       await refresh();
     } catch (caught) {
@@ -669,17 +1109,12 @@ export default function AdminWorkspace({
     setNotice("");
     const formData = new FormData(event.currentTarget);
     try {
-      const { data, error: updateError } = await createClient()
-        .from("categories")
-        .update({
-          name_en: String(formData.get("name_en") ?? "").trim(),
-          name_bn: String(formData.get("name_bn") ?? "").trim(),
-        })
-        .eq("id", category.id)
-        .select("id")
-        .maybeSingle();
-      if (updateError) throw new Error(updateError.message);
-      if (!data) throw new Error("Category was not updated. Confirm you have Admin access.");
+      const firestore = await import("@firebase/firestore");
+      const db = await getFirebaseDb();
+      await firestore.updateDoc(firestore.doc(db, "categories", category.id), {
+        name_en: String(formData.get("name_en") ?? "").trim(),
+        name_bn: String(formData.get("name_bn") ?? "").trim(),
+      });
       setNotice("Category names updated.");
       await refresh();
     } catch (caught) {
@@ -698,15 +1133,17 @@ export default function AdminWorkspace({
     const formData = new FormData(form);
     try {
       const parentId = String(formData.get("parent_id") ?? "");
-      const { error: insertError } = await createClient().from("categories").insert({
-        slug: String(formData.get("slug") ?? "").trim().toLowerCase(),
+      const slug = String(formData.get("slug") ?? "").trim().toLowerCase();
+      const firestore = await import("@firebase/firestore");
+      const db = await getFirebaseDb();
+      await firestore.setDoc(firestore.doc(db, "categories", slug), {
+        slug,
         name_en: String(formData.get("name_en") ?? "").trim(),
         name_bn: String(formData.get("name_bn") ?? "").trim(),
         parent_id: parentId || null,
         icon: "tag",
         sort_order: 100,
       });
-      if (insertError) throw new Error(insertError.message);
       form.reset();
       setNotice("Category created.");
       await refresh();
@@ -731,10 +1168,18 @@ export default function AdminWorkspace({
         <Panel>
           <h1 className="text-xl font-bold text-slate-950">{requiredRole === "admin" ? "Administrator access required" : "Moderator access required"}</h1>
           <p className="mt-3 text-sm leading-6 text-slate-600">
-            {requiredRole === "admin"
-              ? "This private admin console is available only to administrators. Moderators can use the separate moderation page."
-              : "This review workspace is available only to moderators. Administrators can review listings from the admin console."}
+            {requiredRole === "admin" && user?.email?.toLowerCase() === ownerEmail
+              ? "Use the owner account to claim the first administrator role. This one-time action only succeeds if no administrator has been set up."
+              : requiredRole === "admin"
+                ? "This private admin console is available only to administrators. Moderators can use the separate moderation page."
+                : "This review workspace is available only to moderators. Administrators can review listings from the admin console."}
           </p>
+          {requiredRole === "admin" && user?.email?.toLowerCase() === ownerEmail && (
+            <button className="mt-5 min-h-11 rounded-xl bg-emerald-700 px-5 text-sm font-bold text-white disabled:opacity-60" disabled={bootstrapping} onClick={bootstrapFirstAdmin} type="button">
+              {bootstrapping ? "Setting up administrator…" : "Set up first administrator"}
+            </button>
+          )}
+          {error && <p aria-live="assertive" className="mt-4 rounded-xl bg-rose-50 p-3 text-sm leading-6 text-rose-800">{error}</p>}
         </Panel>
       </main>
     );
@@ -821,9 +1266,9 @@ export default function AdminWorkspace({
                 <h2 className="text-lg font-bold text-slate-950">System and security overview</h2>
                 <p className="mt-1 text-sm text-slate-600">Operational status based on the latest successful database queries.</p>
                 <dl className="mt-5 grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
-                  <div><dt className="text-slate-500">Marketplace database</dt><dd className="mt-1 font-semibold text-emerald-800">Supabase · connected</dd></div>
+                  <div><dt className="text-slate-500">Marketplace database</dt><dd className="mt-1 font-semibold text-emerald-800">Firebase Firestore · connected</dd></div>
                   <div><dt className="text-slate-500">Sign-in provider</dt><dd className="mt-1 font-semibold text-slate-900">Firebase Auth</dd></div>
-                  <div><dt className="text-slate-500">Authorization</dt><dd className="mt-1 font-semibold text-slate-900">Database Row Level Security</dd></div>
+                  <div><dt className="text-slate-500">Authorization</dt><dd className="mt-1 font-semibold text-slate-900">Firestore security rules and Firebase claims</dd></div>
                   <div><dt className="text-slate-500">Last database check</dt><dd className="mt-1 font-semibold text-slate-900">{connectedAt ? dateFormatter.format(new Date(connectedAt)) : "Checking…"}</dd></div>
                 </dl>
                 <p className="mt-4 rounded-xl bg-amber-50 p-3 text-xs leading-5 text-amber-900">Secret keys, service credentials, and raw security tokens are never displayed in this browser workspace.</p>
@@ -847,12 +1292,7 @@ export default function AdminWorkspace({
             {ads.length === 0 ? <EmptyState title="The review queue is clear" text="New submissions will appear here as soon as they are sent for approval." /> : ads.map((ad) => (
               <Panel className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between" key={ad.id}>
                 {ad.photoUrl && (
-                  <div
-                    aria-label={`Photo of ${ad.title}`}
-                    className="aspect-[4/3] w-full shrink-0 rounded-xl bg-slate-100 bg-cover bg-center sm:w-44"
-                    role="img"
-                    style={{ backgroundImage: `url("${ad.photoUrl}")` }}
-                  />
+                  <StaffListingPhoto title={ad.title} url={ad.photoUrl} />
                 )}
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
@@ -1027,6 +1467,216 @@ export default function AdminWorkspace({
       </div>
     </main>
   );
+}
+```
+
+## src/app/api/listing-images/[...key]/route.ts
+
+```typescript
+import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { NextResponse, type NextRequest } from "next/server";
+import { verifyFirebaseIdToken, type FirebaseIdentity } from "@/lib/firebase/verify-id-token";
+
+export const runtime = "nodejs";
+
+const maxImageBytes = 1_900_000;
+
+type RouteContext = { params: Promise<{ key: string[] }> };
+
+function jsonError(message: string, status: number) {
+  return NextResponse.json({ error: message }, { status });
+}
+
+function getToken(request: NextRequest): string | null {
+  const authorization = request.headers.get("authorization");
+  if (!authorization?.startsWith("Bearer ")) return null;
+  return authorization.slice("Bearer ".length).trim() || null;
+}
+
+async function getIdentity(request: NextRequest, required: boolean): Promise<FirebaseIdentity | null> {
+  const token = getToken(request);
+  if (!token) {
+    if (required) throw new Error("Sign in before managing listing photos.");
+    return null;
+  }
+  try {
+    return await verifyFirebaseIdToken(token);
+  } catch {
+    throw new Error("Your sign-in has expired. Sign in again and retry.");
+  }
+}
+
+function getListingKey(parts: string[]): { key: string; sellerId: string; adId: string } | null {
+  const key = parts.join("/");
+  const match = /^([A-Za-z0-9_-]{1,128})\/([0-9a-f-]{36})\/([0-9a-f-]{36}\.webp)$/i.exec(key);
+  if (!match) return null;
+  return { key, sellerId: match[1], adId: match[2] };
+}
+
+async function getListing(request: NextRequest, adId: string) {
+  const projectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID;
+  const apiKey = process.env.NEXT_PUBLIC_FIREBASE_API_KEY;
+  if (!projectId || !apiKey) throw new Error("Firebase is not configured for listing photo access.");
+
+  const url = new URL(
+    `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/(default)/documents/ads/${encodeURIComponent(adId)}`,
+  );
+  url.searchParams.set("key", apiKey);
+  const token = getToken(request);
+  const response = await fetch(url, {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    cache: "no-store",
+  });
+  if (response.status === 404 || response.status === 403) return null;
+  if (!response.ok) throw new Error(`Firestore listing lookup failed (${response.status}).`);
+  const document = await response.json() as {
+    fields?: {
+      seller_id?: { stringValue?: string };
+      status?: { stringValue?: string };
+      images?: { arrayValue?: { values?: Array<{ mapValue?: { fields?: { key?: { stringValue?: string } } } }> } };
+    };
+  };
+  return {
+    sellerId: document.fields?.seller_id?.stringValue ?? "",
+    status: document.fields?.status?.stringValue ?? "",
+    imageKeys: (document.fields?.images?.arrayValue?.values ?? [])
+      .map((image) => image.mapValue?.fields?.key?.stringValue)
+      .filter((key): key is string => typeof key === "string"),
+  };
+}
+
+async function getBucket(): Promise<CloudflareEnv["LISTING_IMAGES"]> {
+  const { env } = await getCloudflareContext({ async: true });
+  return env.LISTING_IMAGES;
+}
+
+async function readBoundedBody(request: NextRequest): Promise<ArrayBuffer | null> {
+  const reader = request.body?.getReader();
+  if (!reader) return new ArrayBuffer(0);
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxImageBytes) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new ArrayBuffer(total);
+  const bytes = new Uint8Array(body);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+}
+
+export async function GET(request: NextRequest, context: RouteContext) {
+  try {
+    const identity = await getIdentity(request, false);
+    const path = getListingKey((await context.params).key);
+    if (!path) return jsonError("Invalid listing photo path.", 400);
+    const listing = await getListing(request, path.adId);
+    if (!listing) return jsonError("Listing photo not found.", 404);
+    if (path.sellerId !== listing.sellerId || !listing.imageKeys.includes(path.key)) {
+      return jsonError("Listing photo not found.", 404);
+    }
+    const isOwner = identity?.sub === listing.sellerId && path.sellerId === listing.sellerId;
+    const isStaff = identity?.role === "admin" || identity?.role === "moderator";
+    if (listing.status !== "active" && !isOwner && !isStaff) {
+      return jsonError("Listing photo not found.", 404);
+    }
+
+    const image = await (await getBucket()).get(path.key);
+    if (!image) return jsonError("Listing photo not found.", 404);
+    const headers = new Headers({
+      "Content-Type": image.httpMetadata?.contentType ?? "image/webp",
+      "X-Content-Type-Options": "nosniff",
+      "Cache-Control": listing.status === "active" ? "public, max-age=300" : "private, no-store",
+    });
+    if (image.httpEtag) headers.set("ETag", image.httpEtag);
+    return new Response(image.body, { headers });
+  } catch (error) {
+    if (error instanceof Error && (error.message.startsWith("Sign in") || error.message.startsWith("Your sign-in"))) {
+      return jsonError(error.message, 401);
+    }
+    console.error("Could not serve listing photo.", error);
+    return jsonError("Could not load this listing photo.", 500);
+  }
+}
+
+export async function POST(request: NextRequest, context: RouteContext) {
+  try {
+    const identity = await getIdentity(request, true);
+    const path = getListingKey((await context.params).key);
+    if (!path) return jsonError("Invalid listing photo path.", 400);
+    if (!identity || identity.sub !== path.sellerId) return jsonError("You cannot upload photos for this account.", 403);
+    const listing = await getListing(request, path.adId);
+    if (!listing || listing.sellerId !== identity.sub || listing.status !== "draft") {
+      return jsonError("Photos can only be uploaded to your private draft.", 403);
+    }
+    if (request.headers.get("content-type") !== "image/webp") return jsonError("Photos must be WebP images.", 415);
+    const contentLength = request.headers.get("content-length");
+    if (contentLength !== null && !/^\d+$/.test(contentLength)) {
+      return jsonError("Invalid photo content length.", 400);
+    }
+    if (contentLength !== null && Number(contentLength) > maxImageBytes) {
+      return jsonError("Photo exceeds the 1.9 MB limit.", 413);
+    }
+    const body = await readBoundedBody(request);
+    if (body === null) return jsonError("Photo exceeds the 1.9 MB limit.", 413);
+    if (body.byteLength === 0) {
+      return jsonError("Photo is empty or exceeds the 1.9 MB limit.", 413);
+    }
+    const header = new Uint8Array(body, 0, Math.min(body.byteLength, 12));
+    const isWebp = header.length >= 12 &&
+      String.fromCharCode(...header.slice(0, 4)) === "RIFF" &&
+      String.fromCharCode(...header.slice(8, 12)) === "WEBP";
+    if (!isWebp) return jsonError("The uploaded file is not a valid WebP image.", 415);
+
+    await (await getBucket()).put(path.key, body, {
+      httpMetadata: { contentType: "image/webp" },
+      customMetadata: { adId: path.adId, sellerId: identity.sub },
+    });
+    return NextResponse.json({ key: path.key }, { status: 201 });
+  } catch (error) {
+    if (error instanceof Error && (error.message.startsWith("Sign in") || error.message.startsWith("Your sign-in"))) {
+      return jsonError(error.message, 401);
+    }
+    console.error("Could not upload listing photo.", error);
+    return jsonError("Could not upload this listing photo.", 500);
+  }
+}
+
+export async function DELETE(request: NextRequest, context: RouteContext) {
+  try {
+    const identity = await getIdentity(request, true);
+    const path = getListingKey((await context.params).key);
+    if (!path) return jsonError("Invalid listing photo path.", 400);
+    if (!identity) return jsonError("Sign in before removing listing photos.", 401);
+    const listing = await getListing(request, path.adId);
+    const isOwner = identity.sub === path.sellerId && listing?.sellerId === identity.sub;
+    const isAdmin = identity.role === "admin";
+    if (!listing || (!isAdmin && (!isOwner || !["draft", "pending"].includes(listing.status)))) {
+      return jsonError("You cannot remove this listing photo.", 403);
+    }
+    await (await getBucket()).delete(path.key);
+    return new Response(null, { status: 204 });
+  } catch (error) {
+    if (error instanceof Error && (error.message.startsWith("Sign in") || error.message.startsWith("Your sign-in"))) {
+      return jsonError(error.message, 401);
+    }
+    console.error("Could not remove listing photo.", error);
+    return jsonError("Could not remove this listing photo.", 500);
+  }
 }
 ```
 
@@ -1240,7 +1890,7 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
-import { getRedirectResult, GoogleAuthProvider, onAuthStateChanged, sendSignInLinkToEmail, signInWithEmailLink, signInWithPopup, signInWithRedirect, signOut, type User } from "@firebase/auth";
+import { createUserWithEmailAndPassword, getRedirectResult, GoogleAuthProvider, onAuthStateChanged, sendEmailVerification, sendSignInLinkToEmail, signInWithEmailAndPassword, signInWithEmailLink, signInWithPopup, signInWithRedirect, signOut, type User } from "@firebase/auth";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/client";
 import { prepareUserForMarketplace } from "@/lib/firebase/prepare-user";
@@ -1260,6 +1910,8 @@ function messageForError(error: unknown): string {
         return "An account already exists with this email. Sign in using the provider you originally used.";
       case "auth/cancelled-popup-request":
         return "A Google sign-in attempt is already open. Finish that window or close it before trying again.";
+      case "auth/weak-password":
+        return "Use at least 8 characters with uppercase and lowercase letters, a number, and a special character.";
     }
   }
   return error instanceof Error ? error.message : "Something went wrong. Please try again.";
@@ -1271,11 +1923,26 @@ function getAuthErrorCode(error: unknown): string | null {
     : null;
 }
 
+function validatePassword(password: string): string | null {
+  const requirements = [
+    [password.length >= 8, "at least 8 characters"],
+    [/[A-Z]/.test(password), "an uppercase letter"],
+    [/[a-z]/.test(password), "a lowercase letter"],
+    [/\d/.test(password), "a number"],
+    [/[^A-Za-z0-9]/.test(password), "a special character"],
+  ] as const;
+  const missing = requirements.filter(([valid]) => !valid).map(([, requirement]) => requirement);
+  return missing.length ? `Password must include ${missing.join(", ")}.` : null;
+}
+
 export default function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const configured = isFirebaseConfigured();
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [authMethod, setAuthMethod] = useState<"email-link" | "password">("email-link");
+  const [passwordAction, setPasswordAction] = useState<"signin" | "signup">("signin");
   const [user, setUser] = useState<User | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -1354,6 +2021,26 @@ export default function LoginForm() {
       const normalizedEmail = email.trim().toLowerCase();
       if (!normalizedEmail) throw new Error("Enter your email address.");
 
+      if (authMethod === "password") {
+        if (passwordAction === "signup") {
+          const passwordError = validatePassword(password);
+          if (passwordError) throw new Error(passwordError);
+          const credential = await createUserWithEmailAndPassword(auth, normalizedEmail, password);
+          await sendEmailVerification(credential.user);
+          await signOut(auth);
+          setUser(null);
+          setPassword("");
+          setNotice("Account created. Verify your email using the link we sent, then sign in with your password.");
+          return;
+        }
+
+        const credential = await signInWithEmailAndPassword(auth, normalizedEmail, password);
+        setUser(credential.user);
+        await prepareUserForMarketplace(credential.user);
+        router.replace(nextPath);
+        return;
+      }
+
       if (isLink) {
         const signedIn = await signInWithEmailLink(auth, normalizedEmail, window.location.href);
         window.localStorage.removeItem("turnover-signin-email");
@@ -1381,8 +2068,30 @@ export default function LoginForm() {
     setBusy(true);
     setError("");
     try {
-      await prepareUserForMarketplace(user);
+      await user.reload();
+      const currentUser = getFirebaseAuth().currentUser;
+      if (!currentUser?.emailVerified) {
+        setError("Verify your email using the link we sent, then select continue again.");
+        return;
+      }
+      setUser(currentUser);
+      await prepareUserForMarketplace(currentUser);
       router.replace(nextPath);
+    } catch (caught) {
+      setError(messageForError(caught));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resendVerificationEmail() {
+    if (!user) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      await sendEmailVerification(user);
+      setNotice("Verification email sent. Check your inbox and spam folder.");
     } catch (caught) {
       setError(messageForError(caught));
     } finally {
@@ -1409,7 +2118,7 @@ export default function LoginForm() {
             {isLink ? "Finish signing in" : "Welcome to TurnOver"}
           </h1>
           <p className="mt-3 max-w-md text-sm leading-6 text-slate-600">
-            New here or returning? Continue with Google or use a one-time email link. First-time sign-in creates your account automatically.
+            Sign up with email and password, or continue with Google or a one-time email link.
           </p>
 
           {user ? (
@@ -1417,11 +2126,17 @@ export default function LoginForm() {
               <p className="rounded-xl bg-emerald-50 p-4 text-sm text-emerald-950">
                 Signed in as <span className="font-semibold">{user.email}</span>.
               </p>
+              {!user.emailVerified && (
+                <div className="rounded-xl bg-amber-50 p-4 text-sm leading-6 text-amber-950">
+                  Verify your email before using TurnOver. Open the verification link in your inbox, then continue.
+                  <button className="mt-3 block font-bold text-emerald-800 underline disabled:opacity-60" disabled={busy} onClick={resendVerificationEmail} type="button">Resend verification email</button>
+                </div>
+              )}
               {error && <p aria-live="assertive" className="rounded-xl bg-rose-50 p-3 text-sm leading-6 text-rose-800">{error}</p>}
               <button className="min-h-12 w-full rounded-xl bg-emerald-700 px-5 text-sm font-bold text-white hover:bg-emerald-800 disabled:opacity-60" disabled={busy} onClick={finishMarketplaceSetup} type="button">
                 {busy ? "Connecting your account…" : "Continue to TurnOver"}
               </button>
-              <p className="text-center text-xs leading-5 text-slate-500">First time here? Google sign-in creates your account automatically.</p>
+              <p className="text-center text-xs leading-5 text-slate-500">{user.emailVerified ? "Your account is ready to use." : "After verifying your inbox, select continue to refresh your account."}</p>
               <button className="w-full py-2 text-sm font-semibold text-slate-600 hover:text-slate-900" onClick={leaveAccount} type="button">
                 Use another account
               </button>
@@ -1449,6 +2164,12 @@ export default function LoginForm() {
                   OR USE EMAIL
                   <span className="h-px flex-1 bg-slate-200" />
                 </div>
+                {!isLink && (
+                  <div className="flex gap-2 rounded-xl bg-slate-100 p-1">
+                    <button className={`min-h-10 flex-1 rounded-lg text-sm font-semibold ${authMethod === "email-link" ? "bg-white text-emerald-800 shadow-sm" : "text-slate-600"}`} onClick={() => { setAuthMethod("email-link"); setError(""); setNotice(""); }} type="button">Email link</button>
+                    <button className={`min-h-10 flex-1 rounded-lg text-sm font-semibold ${authMethod === "password" ? "bg-white text-emerald-800 shadow-sm" : "text-slate-600"}`} onClick={() => { setAuthMethod("password"); setError(""); setNotice(""); }} type="button">Password</button>
+                  </div>
+                )}
                 <label className="block text-sm font-semibold text-slate-800" htmlFor="email">Email address</label>
                 <input
                   autoComplete="email"
@@ -1460,8 +2181,29 @@ export default function LoginForm() {
                   type="email"
                   value={email}
                 />
+                {authMethod === "password" && (
+                  <>
+                    <label className="block text-sm font-semibold text-slate-800" htmlFor="password">Password</label>
+                    <input
+                      autoComplete={passwordAction === "signup" ? "new-password" : "current-password"}
+                      className="min-h-12 w-full rounded-xl border border-slate-300 px-4 text-sm outline-none focus:border-emerald-700 focus:ring-2 focus:ring-emerald-100"
+                      id="password"
+                      minLength={8}
+                      onChange={(event) => setPassword(event.target.value)}
+                      required
+                      type="password"
+                      value={password}
+                    />
+                    {passwordAction === "signup" && (
+                      <p className="text-xs leading-5 text-slate-500">Use at least 8 characters with uppercase, lowercase, a number, and a special character.</p>
+                    )}
+                    <button className="w-full text-left text-sm font-semibold text-emerald-800 hover:underline" onClick={() => { setPasswordAction(passwordAction === "signin" ? "signup" : "signin"); setPassword(""); setError(""); setNotice(""); }} type="button">
+                      {passwordAction === "signin" ? "Create an account" : "Already have an account? Sign in"}
+                    </button>
+                  </>
+                )}
                 <button className="min-h-12 w-full rounded-xl bg-emerald-700 px-5 text-sm font-bold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-60" disabled={busy} type="submit">
-                  {busy ? "Please wait…" : isLink ? "Verify email and sign in" : "Email me a sign-in link"}
+                  {busy ? "Please wait…" : isLink ? "Verify email and sign in" : authMethod === "password" ? passwordAction === "signup" ? "Create account" : "Sign in with password" : "Email me a sign-in link"}
                 </button>
                 {notice && <p aria-live="polite" className="rounded-xl bg-emerald-50 p-3 text-sm leading-6 text-emerald-900">{notice}</p>}
                 {error && <p aria-live="assertive" className="rounded-xl bg-rose-50 p-3 text-sm leading-6 text-rose-800">{error}</p>}
@@ -1531,8 +2273,7 @@ export default function ModerationPage() {
 ```tsx
 import Link from "next/link";
 import { cookies } from "next/headers";
-import { getHomepageCategories } from "@/lib/categories";
-import { getHomepageListings, getHomepageLocations } from "@/lib/listings";
+import { getHomepageCategories, getHomepageListings, getHomepageLocations } from "@/lib/listings";
 import { formatBDT } from "@/lib/format";
 import type { Locale } from "@/components/locale-switcher";
 
@@ -1810,9 +2551,9 @@ export default function PostAdPage() {
 import { onAuthStateChanged, type User } from "@firebase/auth";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
-import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/client";
+import { getFirebaseAuth, getFirebaseDb, isFirebaseConfigured } from "@/lib/firebase/client";
 import { prepareUserForMarketplace } from "@/lib/firebase/prepare-user";
-import { createClient } from "@/lib/supabase/client";
+import { defaultCategories } from "@/lib/categories";
 
 type CategoryOption = { id: string; name_en: string; name_bn: string };
 type LocationOption = { id: string; name_en: string; name_bn: string };
@@ -1881,23 +2622,26 @@ export default function PostAdForm() {
       setError("");
       try {
         await prepareUserForMarketplace(currentUser);
-        const supabase = createClient();
-        const [categoryResult, locationResult] = await Promise.all([
-          supabase.from("categories")
-            .select("id,name_en,name_bn")
-            .is("parent_id", null)
-            .order("sort_order")
-            .order("name_en"),
-          supabase.from("locations")
-            .select("id,name_en,name_bn")
-            .eq("level", "area")
-            .order("name_en"),
+        const firestore = await import("@firebase/firestore");
+        const db = await getFirebaseDb();
+        const [categoryDocs, locationDocs] = await Promise.all([
+          firestore.getDocs(firestore.collection(db, "categories")),
+          firestore.getDocs(firestore.query(firestore.collection(db, "locations"), firestore.where("level", "==", "area"))),
         ]);
-        if (categoryResult.error) throw new Error(categoryResult.error.message);
-        if (locationResult.error) throw new Error(locationResult.error.message);
+        const categoryOptions = categoryDocs.empty
+          ? defaultCategories.map((category) => ({ id: category.slug, name_en: category.name, name_bn: category.bangla }))
+          : categoryDocs.docs.map((category) => ({
+            id: category.id,
+            name_en: String(category.data().name_en ?? category.id),
+            name_bn: String(category.data().name_bn ?? ""),
+          }));
         if (active) {
-          setCategories(categoryResult.data ?? []);
-          setLocations(locationResult.data ?? []);
+          setCategories(categoryOptions);
+          setLocations(locationDocs.docs.map((location) => ({
+            id: location.id,
+            name_en: String(location.data().name_en ?? location.id),
+            name_bn: String(location.data().name_bn ?? ""),
+          })));
         }
       } catch (caught) {
         if (active) setError(messageForError(caught));
@@ -1928,71 +2672,93 @@ export default function PostAdForm() {
     setBusy(true);
     setError("");
     setNotice("");
-    const supabase = createClient();
     let adId: string | null = null;
+    let firestore: typeof import("@firebase/firestore") | null = null;
+    let db: import("@firebase/firestore").Firestore | null = null;
     const uploadedPaths: string[] = [];
+    const getIdToken = () => user.getIdToken();
 
     try {
+      firestore = await import("@firebase/firestore");
+      db = await getFirebaseDb();
       const preparedImages: Blob[] = [];
       for (const file of files) preparedImages.push(await optimizeImage(file));
       const newAdId = crypto.randomUUID();
-      const { error: insertError } = await supabase.from("ads").insert({
-        id: newAdId,
+      const selectedCategory = categories.find((category) => category.id === String(formData.get("category_id") ?? ""));
+      const selectedLocation = locations.find((location) => location.id === String(formData.get("location_id") ?? ""));
+      if (!selectedCategory || !selectedLocation) throw new Error("Choose a valid category and neighborhood.");
+      const adRef = firestore.doc(db, "ads", newAdId);
+      await firestore.setDoc(adRef, {
         seller_id: user.uid,
-        category_id: String(formData.get("category_id") ?? ""),
-        location_id: String(formData.get("location_id") ?? ""),
+        seller_display_name: user.displayName || user.email?.split("@")[0] || "Seller",
+        category_id: selectedCategory.id,
+        category_name_en: selectedCategory.name_en,
+        location_id: selectedLocation.id,
+        location_name_en: selectedLocation.name_en,
         title: String(formData.get("title") ?? "").trim(),
         description: String(formData.get("description") ?? "").trim(),
         price: Number(formData.get("price")),
         negotiable: formData.get("negotiable") === "on",
         condition: String(formData.get("condition") ?? "used"),
         status: "draft",
+        images: [],
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
       });
-      if (insertError) throw new Error(insertError.message);
       adId = newAdId;
 
+      const imageRows: { key: string; position: number; alt_text: string }[] = [];
       for (const [position, image] of preparedImages.entries()) {
         const imageId = crypto.randomUUID();
-        const storagePath = `${user.uid}/${newAdId}/${imageId}.webp`;
-        const { error: imageRowError } = await supabase.from("ad_images").insert({
-          id: imageId,
-          ad_id: newAdId,
-          owner_id: user.uid,
-          position,
-          storage_path: storagePath,
-          alt_text: String(formData.get("title") ?? "").trim(),
+        const key = `${user.uid}/${newAdId}/${imageId}.webp`;
+        const response = await fetch(`/api/listing-images/${key.split("/").map(encodeURIComponent).join("/")}`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${await getIdToken()}`,
+            "Content-Type": "image/webp",
+          },
+          body: image,
         });
-        if (imageRowError) throw new Error(imageRowError.message);
-
-        const { error: uploadError } = await supabase.storage
-          .from("ad-images")
-          .upload(storagePath, image, { contentType: "image/webp", upsert: false });
-        if (uploadError) throw new Error(uploadError.message);
-        uploadedPaths.push(storagePath);
+        if (!response.ok) {
+          const result: unknown = await response.json();
+          const message = typeof result === "object" && result !== null && "error" in result && typeof result.error === "string"
+            ? result.error
+            : `Could not upload ${files[position].name}.`;
+          throw new Error(message);
+        }
+        uploadedPaths.push(key);
+        imageRows.push({ key, position, alt_text: String(formData.get("title") ?? "").trim() });
       }
 
-      const { data: submittedAd, error: submitError } = await supabase.from("ads")
-        .update({ status: "pending" })
-        .eq("id", newAdId)
-        .eq("status", "draft")
-        .select("id")
-        .maybeSingle();
-      if (submitError) throw new Error(submitError.message);
-      if (!submittedAd) throw new Error("The draft could not be submitted. Refresh the page and try again.");
+      await firestore.updateDoc(adRef, { images: imageRows, status: "pending", updated_at: new Date().toISOString() });
 
       form.reset();
       setFiles([]);
       setNotice("Your ad is in the review queue. It will become public only after a moderator approves it.");
     } catch (caught) {
       const details = [messageForError(caught)];
-      if (adId) {
-        if (uploadedPaths.length > 0) {
-          const { error: storageCleanupError } = await supabase.storage.from("ad-images").remove(uploadedPaths);
-          if (storageCleanupError) details.push(`Photo cleanup also failed: ${storageCleanupError.message}`);
+      if (adId && db && firestore) {
+        const idToken = await getIdToken();
+        const cleanupResults = await Promise.all(uploadedPaths.map(async (key) => {
+          const response = await fetch(`/api/listing-images/${key.split("/").map(encodeURIComponent).join("/")}`, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${idToken}` },
+          });
+          if (!response.ok) {
+            const result: unknown = await response.json();
+            return typeof result === "object" && result !== null && "error" in result && typeof result.error === "string"
+              ? result.error
+              : `Could not remove ${key}.`;
+          }
+          return null;
+        }));
+        const cleanupError = cleanupResults.find((result): result is string => result !== null);
+        if (cleanupError) {
+          details.push(`Photo cleanup also failed: ${cleanupError}`);
+        } else {
+          await firestore.deleteDoc(firestore.doc(db, "ads", adId));
         }
-        const { error: imageCleanupError } = await supabase.from("ad_images").delete().eq("ad_id", adId);
-        if (imageCleanupError) details.push(`Draft-photo cleanup also failed: ${imageCleanupError.message}`);
-        details.push("A private draft was retained; it was not sent for review.");
+        if (cleanupError) details.push("A private draft was retained; it was not sent for review.");
       }
       setError(details.join(" "));
     } finally {
@@ -2005,7 +2771,7 @@ export default function PostAdForm() {
       <main className="mx-auto min-h-[65vh] max-w-3xl px-4 py-16 sm:px-6">
         <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           <h1 className="text-xl font-bold text-slate-950">Sign-in setup is not complete</h1>
-          <p className="mt-3 text-sm leading-6 text-slate-600">Connect Firebase and Supabase using the steps in the setup guide before posting a listing.</p>
+          <p className="mt-3 text-sm leading-6 text-slate-600">Connect Firebase and Cloudflare using the steps in the setup guide before posting a listing.</p>
         </section>
       </main>
     );
@@ -2117,11 +2883,10 @@ export default function PostAdForm() {
 ```tsx
 "use client";
 
-import { onIdTokenChanged, signOut } from "@firebase/auth";
+import { getIdTokenResult, onIdTokenChanged, signOut } from "@firebase/auth";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/client";
-import { createClient } from "@/lib/supabase/client";
 import type { Locale } from "./locale-switcher";
 
 export default function AccountControls({ locale }: { locale: Locale }) {
@@ -2140,14 +2905,10 @@ export default function AccountControls({ locale }: { locale: Locale }) {
       setAuthError("");
       if (!user) return;
       try {
-        const { data, error } = await createClient()
-          .from("user_roles")
-          .select("role")
-          .eq("user_id", user.uid)
-          .maybeSingle();
-        if (error) throw new Error(error.message);
-        if (active && (data?.role === "admin" || data?.role === "moderator")) {
-          setStaffHref(data.role === "admin" ? "/admin" : "/moderation");
+        const token = await getIdTokenResult(user);
+        const role = token.claims.role;
+        if (active && (role === "admin" || role === "moderator")) {
+          setStaffHref(role === "admin" ? "/admin" : "/moderation");
         }
       } catch (caught) {
         if (active) setAuthError(caught instanceof Error ? caught.message : "Could not check your staff access.");
@@ -2259,9 +3020,6 @@ export default function LocaleSwitcher({ locale }: { locale: Locale }) {
 ## src/lib/categories.ts
 
 ```typescript
-import "server-only";
-import { createClient } from "@supabase/supabase-js";
-
 export type MarketplaceCategory = {
   slug: string;
   name: string;
@@ -2300,7 +3058,7 @@ const iconByKey: Record<string, string> = {
   "book-open": "📚",
 };
 
-const defaultCategories: MarketplaceCategory[] = [
+export const defaultCategories: MarketplaceCategory[] = [
   { slug: "mobiles", name: "Mobiles", bangla: "মোবাইল", ...categoryPresentation.mobiles },
   { slug: "electronics", name: "Electronics", bangla: "ইলেকট্রনিক্স", ...categoryPresentation.electronics },
   { slug: "vehicles", name: "Vehicles", bangla: "যানবাহন", ...categoryPresentation.vehicles },
@@ -2315,30 +3073,11 @@ const defaultCategories: MarketplaceCategory[] = [
   { slug: "books-education", name: "Books & Education", bangla: "বই ও শিক্ষা", ...categoryPresentation["books-education"] },
 ];
 
-export async function getHomepageCategories(): Promise<MarketplaceCategory[]> {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-  if (!url || !key || url.includes("YOUR_PROJECT_REF") || key === "YOUR_PUBLISHABLE_KEY") {
-    return defaultCategories;
-  }
-
-  const supabase = createClient(url, key, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
-  const { data, error } = await supabase
-    .from("categories")
-    .select("slug,name_en,name_bn,icon")
-    .is("parent_id", null)
-    .order("sort_order")
-    .order("name_en");
-  if (error) throw new Error(`Could not load marketplace categories: ${error.message}`);
-  return data.map((category) => ({
-    slug: category.slug,
-    name: category.name_en,
-    bangla: category.name_bn,
-    icon: categoryPresentation[category.slug]?.icon ?? iconByKey[category.icon] ?? "🏷️",
-    tone: categoryPresentation[category.slug]?.tone ?? "bg-emerald-50",
-  }));
+export function categoryPresentationFor(slug: string, icon = "tag") {
+  return {
+    icon: categoryPresentation[slug]?.icon ?? iconByKey[icon] ?? "🏷️",
+    tone: categoryPresentation[slug]?.tone ?? "bg-emerald-50",
+  };
 }
 ```
 
@@ -2355,13 +3094,11 @@ function getConfig() {
   const apiKey = process.env.NEXT_PUBLIC_FIREBASE_API_KEY;
   const authDomain = process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN;
   const projectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID;
-  const storageBucket = process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET;
-  const messagingSenderId = process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID;
   const appId = process.env.NEXT_PUBLIC_FIREBASE_APP_ID;
-  if (!apiKey || !authDomain || !projectId || !storageBucket || !messagingSenderId || !appId) {
+  if (!apiKey || !authDomain || !projectId || !appId) {
     throw new Error("Firebase is not configured. Copy the Firebase values from .env.example to .env.local.");
   }
-  return { apiKey, authDomain, projectId, storageBucket, messagingSenderId, appId };
+  return { apiKey, authDomain, projectId, appId };
 }
 
 export function isFirebaseConfigured(): boolean {
@@ -2369,8 +3106,6 @@ export function isFirebaseConfigured(): boolean {
     process.env.NEXT_PUBLIC_FIREBASE_API_KEY &&
     process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN &&
     process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID &&
-    process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET &&
-    process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID &&
     process.env.NEXT_PUBLIC_FIREBASE_APP_ID
   );
 }
@@ -2381,6 +3116,11 @@ export function getFirebaseApp(): FirebaseApp {
 
 export function getFirebaseAuth() {
   return getAuth(getFirebaseApp());
+}
+
+export async function getFirebaseDb() {
+  const { getFirestore } = await import("@firebase/firestore");
+  return getFirestore(getFirebaseApp());
 }
 
 export function getFirebaseFunctions() {
@@ -2396,17 +3136,41 @@ export function getFirebaseFunctions() {
 import { httpsCallable } from "@firebase/functions";
 import type { User } from "@firebase/auth";
 import { getFirebaseFunctions } from "./client";
-import { createClient } from "@/lib/supabase/client";
 
 export async function prepareUserForMarketplace(user: User): Promise<void> {
-  const ensureRole = httpsCallable(getFirebaseFunctions(), "ensureSupabaseAuthenticatedRole");
-  await ensureRole();
-  await user.getIdToken(true);
-
-  const { error } = await createClient().rpc("ensure_current_profile");
-  if (error) {
-    throw new Error(`Firebase sign-in worked, but marketplace setup failed: ${error.message}`);
+  if (!user.email || !user.emailVerified) {
+    throw new Error("Verify your email address before creating a marketplace profile.");
   }
+  const ensureProfile = httpsCallable(getFirebaseFunctions(), "ensureMarketplaceProfile");
+  await ensureProfile();
+}
+```
+
+## src/lib/firebase/verify-id-token.ts
+
+```typescript
+import "server-only";
+
+import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
+
+const projectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID;
+const firebaseKeys = createRemoteJWKSet(
+  new URL("https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com"),
+);
+
+export type FirebaseIdentity = JWTPayload & { sub: string; role?: string };
+
+export async function verifyFirebaseIdToken(token: string): Promise<FirebaseIdentity> {
+  if (!projectId) throw new Error("Firebase project ID is not configured for server authentication.");
+  const { payload } = await jwtVerify(token, firebaseKeys, {
+    issuer: `https://securetoken.google.com/${projectId}`,
+    audience: projectId,
+    algorithms: ["RS256"],
+  });
+  if (typeof payload.sub !== "string" || payload.sub.length === 0) {
+    throw new Error("The Firebase ID token does not contain a valid user ID.");
+  }
+  return payload as FirebaseIdentity;
 }
 ```
 
@@ -2463,7 +3227,23 @@ export function normalizeBDPhone(input: string): string | null {
 
 ```typescript
 import "server-only";
-import { createClient } from "@supabase/supabase-js";
+import { categoryPresentationFor, defaultCategories, type MarketplaceCategory } from "./categories";
+
+type FirestoreValue = {
+  stringValue?: string;
+  integerValue?: string;
+  doubleValue?: number;
+  booleanValue?: boolean;
+  timestampValue?: string;
+  nullValue?: null;
+  arrayValue?: { values?: FirestoreValue[] };
+  mapValue?: { fields?: Record<string, FirestoreValue> };
+};
+
+type FirestoreDocument = {
+  name: string;
+  fields?: Record<string, FirestoreValue>;
+};
 
 export type HomepageLocation = { id: string; name_en: string; name_bn: string };
 
@@ -2478,25 +3258,73 @@ export type HomepageListing = {
   photoUrl: string;
 };
 
-function getPublicSupabaseClient() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-  if (!url || !key || url.includes("YOUR_PROJECT_REF") || key === "YOUR_PUBLISHABLE_KEY") return null;
-  return createClient(url, key, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
+export async function getHomepageCategories(): Promise<MarketplaceCategory[]> {
+  const categories = await getDocuments("categories");
+  if (categories.length === 0) return defaultCategories;
+  return categories.map(({ id, data }) => {
+    const presentation = categoryPresentationFor(id, String(data.icon ?? "tag"));
+    return {
+      slug: id,
+      name: String(data.name_en ?? id),
+      bangla: String(data.name_bn ?? ""),
+      ...presentation,
+    };
+  }).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function decodeValue(value: FirestoreValue): unknown {
+  if (value.stringValue !== undefined) return value.stringValue;
+  if (value.integerValue !== undefined) return Number(value.integerValue);
+  if (value.doubleValue !== undefined) return value.doubleValue;
+  if (value.booleanValue !== undefined) return value.booleanValue;
+  if (value.timestampValue !== undefined) return value.timestampValue;
+  if (value.nullValue !== undefined) return null;
+  if (value.arrayValue !== undefined) return (value.arrayValue.values ?? []).map(decodeValue);
+  if (value.mapValue !== undefined) {
+    return Object.fromEntries(Object.entries(value.mapValue.fields ?? {}).map(([key, item]) => [key, decodeValue(item)]));
+  }
+  return null;
+}
+
+function decodeDocument(document: FirestoreDocument): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(document.fields ?? {}).map(([key, value]) => [key, decodeValue(value)]),
+  );
+}
+
+function getFirestoreEndpoint(path: string): string | null {
+  const projectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID;
+  const apiKey = process.env.NEXT_PUBLIC_FIREBASE_API_KEY;
+  if (!projectId || !apiKey) return null;
+  return `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/(default)/documents/${path}?key=${encodeURIComponent(apiKey)}`;
+}
+
+async function getDocuments(collection: string): Promise<Array<{ id: string; data: Record<string, unknown> }>> {
+  const endpoint = getFirestoreEndpoint(collection);
+  if (!endpoint) return [];
+  const url = new URL(endpoint);
+  url.searchParams.set("pageSize", "1000");
+  const response = await fetch(url, { next: { revalidate: 300 } });
+  if (!response.ok) {
+    throw new Error(`Could not load ${collection} from Firestore (${response.status}). Check the Firestore database and rules.`);
+  }
+  const body: { documents?: FirestoreDocument[] } = await response.json();
+  return (body.documents ?? []).map((document) => ({
+    id: document.name.split("/").at(-1) ?? "",
+    data: decodeDocument(document),
+  }));
 }
 
 export async function getHomepageLocations(): Promise<HomepageLocation[]> {
-  const supabase = getPublicSupabaseClient();
-  if (!supabase) return [];
-  const { data, error } = await supabase
-    .from("locations")
-    .select("id,name_en,name_bn")
-    .eq("level", "area")
-    .order("name_en");
-  if (error) throw new Error(`Could not load marketplace locations: ${error.message}`);
-  return data;
+  const locations = await getDocuments("locations");
+  return locations
+    .filter(({ data }) => data.level === "area")
+    .map(({ id, data }) => ({
+      id,
+      name_en: String(data.name_en ?? ""),
+      name_bn: String(data.name_bn ?? ""),
+    }))
+    .sort((a, b) => a.name_en.localeCompare(b.name_en));
 }
 
 export async function getHomepageListings(filters: {
@@ -2504,1037 +3332,90 @@ export async function getHomepageListings(filters: {
   category?: string;
   location?: string;
 }): Promise<HomepageListing[]> {
-  const supabase = getPublicSupabaseClient();
-  if (!supabase) return [];
-
-  let categoryId: string | undefined;
-  if (filters.category) {
-    const { data: category, error: categoryError } = await supabase
-      .from("categories")
-      .select("id")
-      .eq("slug", filters.category.slice(0, 100))
-      .maybeSingle();
-    if (categoryError) throw new Error(`Could not find the selected category: ${categoryError.message}`);
-    categoryId = category?.id ?? "00000000-0000-0000-0000-000000000000";
-  }
-
-  let request = supabase
-    .from("ads")
-    .select("id,title,price,condition,created_at,category:categories(name_en),location:locations(name_en),photos:ad_images(storage_path,position)")
-    .eq("status", "active")
-    .order("created_at", { ascending: false })
-    .limit(24);
-
-  const query = filters.query?.trim().slice(0, 80);
-  if (query) {
-    const escapedQuery = query.replace(/[\\%_]/g, "\\$&");
-    request = request.ilike("title", `%${escapedQuery}%`);
-  }
-  if (categoryId) request = request.eq("category_id", categoryId);
-  if (filters.location && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(filters.location)) {
-    request = request.eq("location_id", filters.location);
-  }
-
-  const { data, error } = await request;
-  if (error) throw new Error(`Could not load approved listings: ${error.message}`);
-
-  return Promise.all((data ?? []).map(async (listing) => {
-    const photo = [...(listing.photos ?? [])].sort((a, b) => a.position - b.position)[0];
-    if (!photo) throw new Error(`Approved listing ${listing.id} is missing its required photo.`);
-    const { data: signedPhoto, error: photoError } = await supabase.storage
-      .from("ad-images")
-      .createSignedUrl(photo.storage_path, 3600);
-    if (photoError) throw new Error(`Could not load a listing photo: ${photoError.message}`);
-    return {
-      id: listing.id,
-      title: listing.title,
-      price: Number(listing.price),
-      condition: listing.condition,
-      created_at: listing.created_at,
-      category: listing.category?.[0]?.name_en ?? "Marketplace",
-      location: listing.location?.[0]?.name_en ?? "Bangladesh",
-      photoUrl: signedPhoto.signedUrl,
-    };
-  }));
-}
-```
-
-## src/lib/supabase/client.ts
-
-```typescript
-"use client";
-
-import { createClient as createSupabaseClient, type SupabaseClient } from "@supabase/supabase-js";
-import { getFirebaseAuth } from "@/lib/firebase/client";
-import { getSupabaseEnv } from "./env";
-
-let browserClient: SupabaseClient | undefined;
-
-export function createClient(): SupabaseClient {
-  if (browserClient) return browserClient;
-  const { url, key } = getSupabaseEnv();
-  browserClient = createSupabaseClient(url, key, {
-    accessToken: async () => getFirebaseAuth().currentUser?.getIdToken() ?? null,
-    auth: {
-      autoRefreshToken: false,
-      detectSessionInUrl: false,
-      persistSession: false,
-    },
+  const endpoint = getFirestoreEndpoint("documents:runQuery");
+  if (!endpoint) return [];
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      structuredQuery: {
+        from: [{ collectionId: "ads" }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath: "status" },
+            op: "EQUAL",
+            value: { stringValue: "active" },
+          },
+        },
+        orderBy: [{ field: { fieldPath: "created_at" }, direction: "DESCENDING" }],
+        limit: 100,
+      },
+    }),
+    next: { revalidate: 60 },
   });
-  return browserClient;
+  if (!response.ok) {
+    throw new Error(`Could not load approved listings from Firestore (${response.status}). Check the Firestore database and rules.`);
+  }
+  const rows: Array<{ document?: FirestoreDocument }> = await response.json();
+  const query = filters.query?.trim().toLocaleLowerCase().slice(0, 80);
+
+  return rows
+    .filter((row): row is { document: FirestoreDocument } => Boolean(row.document))
+    .map(({ document }): Record<string, unknown> & { id: string } => ({
+      id: document.name.split("/").at(-1) ?? "",
+      ...decodeDocument(document),
+    }))
+    .filter((listing) =>
+      (!query || String(listing.title ?? "").toLocaleLowerCase().includes(query)) &&
+      (!filters.category || listing.category_id === filters.category) &&
+      (!filters.location || listing.location_id === filters.location)
+    )
+    .slice(0, 24)
+    .map((listing) => {
+      const photo = Array.isArray(listing.images)
+        ? listing.images
+          .filter((image): image is Record<string, unknown> => typeof image === "object" && image !== null)
+          .sort((a, b) => Number(a.position) - Number(b.position))[0]
+        : undefined;
+      if (!photo || typeof photo.key !== "string") {
+        throw new Error(`Approved listing ${listing.id} is missing its required photo.`);
+      }
+      const photoPath = photo.key.split("/").map(encodeURIComponent).join("/");
+      return {
+        id: listing.id,
+        title: String(listing.title ?? ""),
+        price: Number(listing.price ?? 0),
+        condition: String(listing.condition ?? "used"),
+        created_at: String(listing.created_at ?? ""),
+        category: String(listing.category_name_en ?? "Marketplace"),
+        location: String(listing.location_name_en ?? "Bangladesh"),
+        photoUrl: `/api/listing-images/${photoPath}`,
+      };
+    });
 }
 ```
 
-## src/lib/supabase/env.ts
+## src/types/cloudflare.d.ts
 
 ```typescript
-export function getSupabaseEnv() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-  if (!url || !key || url.includes("YOUR_PROJECT_REF") || key === "YOUR_PUBLISHABLE_KEY") {
-    throw new Error("Supabase is not configured. Copy .env.example to .env.local and add your project URL and publishable key.");
+export {};
+
+declare global {
+  interface CloudflareEnv {
+    LISTING_IMAGES: {
+      get(key: string): Promise<{
+        body: ReadableStream<Uint8Array>;
+        httpMetadata?: { contentType?: string };
+        httpEtag?: string;
+      } | null>;
+      put(
+        key: string,
+        value: ArrayBuffer,
+        options: { httpMetadata: { contentType: string }; customMetadata: Record<string, string> },
+      ): Promise<unknown>;
+      delete(key: string): Promise<void>;
+    };
   }
-  return { url, key };
 }
-```
-
-## supabase/migrations/202610300001_initial_schema.sql
-
-```sql
-begin;
-
-create schema if not exists private;
-revoke all on schema private from public;
-grant usage on schema private to authenticated, anon;
-
-create type public.ad_status as enum ('draft','pending','active','rejected','sold','deleted');
-create type public.product_condition as enum ('new','used');
-create type public.location_level as enum ('division','district','area');
-
-create table public.profiles (
-  id uuid primary key references auth.users(id) on delete cascade,
-  display_name text not null default 'Seller' check (char_length(display_name) between 1 and 80),
-  avatar_path text,
-  contact_verified boolean not null default false,
-  created_at timestamptz not null default now()
-);
-create table public.user_settings (
-  user_id uuid primary key references public.profiles(id) on delete cascade,
-  phone text check (phone ~ '^\+8801[3-9][0-9]{8}$'),
-  show_phone boolean not null default false,
-  whatsapp_enabled boolean not null default false,
-  language text not null default 'en' check (language in ('en','bn'))
-);
-create table public.user_roles (
-  user_id uuid primary key references public.profiles(id) on delete cascade,
-  role text not null default 'admin' check (role = 'admin')
-);
-create function private.is_admin() returns boolean
-language sql stable security definer set search_path = '' as $$
-  select exists (select 1 from public.user_roles where user_id = (select auth.uid()));
-$$;
-
-create table public.categories (
-  id uuid primary key default gen_random_uuid(),
-  parent_id uuid references public.categories(id),
-  slug text not null unique check (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
-  name_en text not null,
-  name_bn text not null,
-  icon text not null default 'tag',
-  field_definitions jsonb not null default '[]'::jsonb check (jsonb_typeof(field_definitions) = 'array'),
-  sort_order integer not null default 0,
-  check (parent_id is distinct from id)
-);
-create table public.locations (
-  id uuid primary key default gen_random_uuid(),
-  parent_id uuid references public.locations(id),
-  level public.location_level not null,
-  slug text not null unique,
-  name_en text not null,
-  name_bn text not null,
-  check ((level = 'division' and parent_id is null) or (level <> 'division' and parent_id is not null))
-);
-create function private.validate_location() returns trigger
-language plpgsql set search_path = '' as $$
-declare parent_level public.location_level;
-begin
-  if new.parent_id is not null then
-    select level into parent_level from public.locations where id = new.parent_id;
-    if (new.level = 'district' and parent_level is distinct from 'division')
-      or (new.level = 'area' and parent_level is distinct from 'district') then
-      raise exception 'Locations must follow division > district > area';
-    end if;
-  end if;
-  if TG_OP = 'UPDATE' and new.level is distinct from old.level then
-    raise exception 'Create a new location instead of changing its level';
-  end if;
-  return new;
-end;
-$$;
-create trigger validate_location before insert or update on public.locations
-for each row execute function private.validate_location();
-
-create table public.ads (
-  id uuid primary key default gen_random_uuid(),
-  seller_id uuid not null references public.profiles(id),
-  category_id uuid not null references public.categories(id),
-  location_id uuid not null references public.locations(id),
-  slug text not null unique default gen_random_uuid()::text check (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
-  title text not null check (char_length(title) between 5 and 120),
-  description text not null check (char_length(description) between 20 and 10000),
-  price numeric(14,2) not null check (price >= 0),
-  negotiable boolean not null default false,
-  condition public.product_condition not null,
-  attributes jsonb not null default '{}'::jsonb check (jsonb_typeof(attributes) = 'object'),
-  status public.ad_status not null default 'draft',
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  published_at timestamptz,
-  search_document tsvector generated always as (
-    to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(description,''))
-  ) stored,
-  unique (id, seller_id)
-);
-create index ads_browse_idx on public.ads (status, category_id, location_id, created_at desc);
-create index ads_price_idx on public.ads (price) where status = 'active';
-create index ads_latest_idx on public.ads (created_at desc) where status = 'active';
-create index ads_search_idx on public.ads using gin (search_document);
-create index ads_seller_idx on public.ads (seller_id);
-create index categories_parent_idx on public.categories (parent_id);
-create index locations_parent_idx on public.locations (parent_id);
-create unique index ads_duplicate_idx on public.ads
-  (seller_id, md5(lower(btrim(title))), md5(lower(btrim(description))))
-  where status in ('pending','active');
-
-create table public.ad_images (
-  id uuid primary key default gen_random_uuid(),
-  ad_id uuid not null references public.ads(id) on delete cascade,
-  owner_id uuid not null,
-  position smallint not null check (position between 0 and 7),
-  storage_path text not null unique,
-  alt_text text not null default '' check (char_length(alt_text) <= 200),
-  foreign key (ad_id, owner_id) references public.ads(id, seller_id) on delete cascade,
-  unique(ad_id, position),
-  check (storage_path = owner_id::text || '/' || ad_id::text || '/' || id::text || '.webp')
-);
-create table public.favorites (
-  user_id uuid not null references public.profiles(id) on delete cascade,
-  ad_id uuid not null references public.ads(id) on delete cascade,
-  created_at timestamptz not null default now(),
-  primary key(user_id, ad_id)
-);
-create index favorites_ad_idx on public.favorites (ad_id);
-create table public.conversations (
-  id uuid primary key default gen_random_uuid(),
-  ad_id uuid not null,
-  buyer_id uuid not null references public.profiles(id),
-  seller_id uuid not null,
-  created_at timestamptz not null default now(),
-  foreign key (ad_id, seller_id) references public.ads(id, seller_id),
-  unique (ad_id,buyer_id),
-  check (buyer_id <> seller_id)
-);
-create index conversations_buyer_idx on public.conversations (buyer_id);
-create index conversations_seller_idx on public.conversations (seller_id);
-create table public.messages (
-  id uuid primary key default gen_random_uuid(),
-  conversation_id uuid not null references public.conversations(id) on delete cascade,
-  sender_id uuid not null references public.profiles(id),
-  body text not null check (char_length(btrim(body)) between 1 and 4000),
-  created_at timestamptz not null default now()
-);
-create index messages_conversation_idx on public.messages (conversation_id,created_at,id);
-create table public.reports (
-  id uuid primary key default gen_random_uuid(),
-  ad_id uuid not null references public.ads(id),
-  reporter_id uuid not null references public.profiles(id),
-  reason text not null check (reason in ('spam','fraud','prohibited','duplicate','other')),
-  details text not null default '' check (char_length(details) <= 2000),
-  resolved boolean not null default false,
-  created_at timestamptz not null default now(),
-  unique (ad_id,reporter_id)
-);
-create table public.ad_promotions (
-  id uuid primary key default gen_random_uuid(),
-  ad_id uuid not null references public.ads(id) on delete cascade,
-  starts_at timestamptz not null default now(),
-  ends_at timestamptz not null,
-  check (ends_at > starts_at)
-);
-create index promotions_ad_idx on public.ad_promotions (ad_id,ends_at);
-create table public.moderation_events (
-  id bigint generated always as identity primary key,
-  ad_id uuid not null references public.ads(id),
-  actor_id uuid references public.profiles(id),
-  from_status public.ad_status,
-  to_status public.ad_status not null,
-  created_at timestamptz not null default now()
-);
-
-create function private.handle_new_user() returns trigger
-language plpgsql security definer set search_path = '' as $$
-begin
-  insert into public.profiles(id) values (new.id);
-  insert into public.user_settings(user_id) values (new.id);
-  return new;
-end;
-$$;
-create trigger on_auth_user_created after insert on auth.users
-for each row execute function private.handle_new_user();
-
-create function private.guard_ad() returns trigger
-language plpgsql security definer set search_path = '' as $$
-begin
-  if TG_OP = 'INSERT' then
-    if not private.is_admin() then
-      new.status := 'draft';
-      new.created_at := now();
-      new.published_at := null;
-    end if;
-  else
-    if new.id <> old.id or new.seller_id <> old.seller_id or new.created_at <> old.created_at then
-      raise exception 'Ad identity and creation date cannot be changed';
-    end if;
-    if not private.is_admin() then
-      if new.published_at is distinct from old.published_at then
-        raise exception 'Only moderation can set publication dates';
-      end if;
-      if new.status = 'active' and old.status <> 'active' then
-        raise exception 'Only admins can approve ads';
-      end if;
-      if new.status = 'rejected' and old.status <> 'rejected' then
-        raise exception 'Only admins can reject ads';
-      end if;
-      if new.status = 'sold' and old.status not in ('active','sold') then
-        raise exception 'Only published ads can be marked sold';
-      end if;
-      if (new.title,new.description,new.price,new.category_id,new.location_id,new.condition,new.attributes,new.negotiable,new.slug)
-        is distinct from
-        (old.title,old.description,old.price,old.category_id,old.location_id,old.condition,old.attributes,old.negotiable,old.slug)
-        and old.status in ('active','sold','rejected') then
-        new.status := 'draft';
-      end if;
-    end if;
-    if new.status = 'active' and old.status <> 'active' then
-      new.published_at := now();
-    end if;
-  end if;
-  if new.status in ('pending','active') then
-    if not exists (
-      select 1 from public.ad_images i join storage.objects o
-      on o.bucket_id = 'ad-images' and o.name = i.storage_path where i.ad_id = new.id
-    ) then
-      raise exception 'Upload at least one photo before submitting';
-    end if;
-    if not exists (select 1 from public.locations where id = new.location_id and level = 'area') then
-      raise exception 'Select an area before submitting';
-    end if;
-  end if;
-  new.updated_at := now();
-  return new;
-end;
-$$;
-create trigger guard_ad before insert or update on public.ads
-for each row execute function private.guard_ad();
-create function private.audit_ad() returns trigger
-language plpgsql security definer set search_path = '' as $$
-begin
-  if new.status is distinct from old.status then
-    insert into public.moderation_events(ad_id,actor_id,from_status,to_status)
-    values (new.id,auth.uid(),old.status,new.status);
-  end if;
-  return new;
-end;
-$$;
-create trigger audit_ad after update on public.ads for each row execute function private.audit_ad();
-
--- Explicit privileges: policies alone do not constrain writable columns.
-revoke all on all tables in schema public from anon, authenticated;
-grant select on public.profiles,public.categories,public.locations,public.ads,public.ad_images,public.ad_promotions to anon,authenticated;
-grant select on public.user_settings,public.user_roles,public.favorites,public.conversations,public.messages,public.reports,public.moderation_events to authenticated;
-grant update(display_name,avatar_path) on public.profiles to authenticated;
-grant update(phone,show_phone,whatsapp_enabled,language) on public.user_settings to authenticated;
-grant insert,update on public.ads,public.ad_images,public.categories,public.locations,public.ad_promotions to authenticated;
-grant delete on public.ad_images,public.favorites,public.ad_promotions to authenticated;
-grant insert on public.favorites,public.conversations,public.messages,public.reports to authenticated;
-grant update(resolved) on public.reports to authenticated;
-
-alter table public.profiles enable row level security;
-alter table public.user_settings enable row level security;
-alter table public.user_roles enable row level security;
-alter table public.categories enable row level security;
-alter table public.locations enable row level security;
-alter table public.ads enable row level security;
-alter table public.ad_images enable row level security;
-alter table public.favorites enable row level security;
-alter table public.conversations enable row level security;
-alter table public.messages enable row level security;
-alter table public.reports enable row level security;
-alter table public.ad_promotions enable row level security;
-alter table public.moderation_events enable row level security;
-
-create policy profiles_read on public.profiles for select using (true);
-create policy profiles_update on public.profiles for update to authenticated using (id = (select auth.uid())) with check (id = (select auth.uid()));
-create policy settings_owner on public.user_settings for all to authenticated using (user_id = (select auth.uid())) with check (user_id = (select auth.uid()));
-create policy roles_read on public.user_roles for select to authenticated using (user_id = (select auth.uid()));
-create policy categories_read on public.categories for select using (true);
-create policy categories_admin on public.categories for all to authenticated using (private.is_admin()) with check (private.is_admin());
-create policy locations_read on public.locations for select using (true);
-create policy locations_admin on public.locations for all to authenticated using (private.is_admin()) with check (private.is_admin());
-create policy ads_read on public.ads for select using (status = 'active' or seller_id = (select auth.uid()) or private.is_admin());
-create policy ads_insert on public.ads for insert to authenticated with check (seller_id = (select auth.uid()) and status = 'draft');
-create policy ads_update on public.ads for update to authenticated using (seller_id = (select auth.uid()) or private.is_admin()) with check (seller_id = (select auth.uid()) or private.is_admin());
-create policy images_read on public.ad_images for select using (exists (select 1 from public.ads a where a.id = ad_id));
-create policy images_write on public.ad_images for all to authenticated
-  using (owner_id = (select auth.uid()) and exists (select 1 from public.ads a where a.id = ad_id and a.seller_id = (select auth.uid()) and a.status = 'draft'))
-  with check (owner_id = (select auth.uid()) and exists (select 1 from public.ads a where a.id = ad_id and a.seller_id = (select auth.uid()) and a.status = 'draft'));
-create policy favorites_owner on public.favorites for all to authenticated using (user_id = (select auth.uid())) with check (user_id = (select auth.uid()));
-create policy conversations_read on public.conversations for select to authenticated using ((select auth.uid()) in (buyer_id,seller_id));
-create policy conversations_create on public.conversations for insert to authenticated with check (
-  buyer_id = (select auth.uid()) and exists (select 1 from public.ads a where a.id = conversations.ad_id and a.seller_id = conversations.seller_id and a.status = 'active')
-);
-create policy messages_read on public.messages for select to authenticated using (exists (select 1 from public.conversations c where c.id = conversation_id));
-create policy messages_insert on public.messages for insert to authenticated with check (sender_id = (select auth.uid()) and exists (select 1 from public.conversations c where c.id = conversation_id));
-create policy reports_read on public.reports for select to authenticated using (reporter_id = (select auth.uid()) or private.is_admin());
-create policy reports_create on public.reports for insert to authenticated with check (
-  reporter_id = (select auth.uid()) and resolved = false and exists (select 1 from public.ads a where a.id = ad_id and a.status = 'active')
-);
-create policy reports_admin on public.reports for update to authenticated using (private.is_admin()) with check (private.is_admin());
-create policy promotions_read on public.ad_promotions for select using (exists (select 1 from public.ads a where a.id = ad_id and a.status = 'active'));
-create policy promotions_admin on public.ad_promotions for all to authenticated using (private.is_admin()) with check (private.is_admin());
-create policy moderation_admin on public.moderation_events for select to authenticated using (private.is_admin());
-
--- Private bucket: clients later request short-lived signed image URLs.
-insert into storage.buckets (id,name,public,file_size_limit,allowed_mime_types)
-values ('ad-images','ad-images',false,2097152,array['image/webp']);
-create policy ad_objects_read on storage.objects for select using (
-  bucket_id = 'ad-images' and exists (select 1 from public.ad_images i where i.storage_path = name)
-);
-create policy ad_objects_insert on storage.objects for insert to authenticated with check (
-  bucket_id = 'ad-images' and exists (
-    select 1 from public.ad_images i join public.ads a on a.id = i.ad_id
-    where i.storage_path = name and i.owner_id = (select auth.uid()) and a.status = 'draft'
-  )
-);
-create policy ad_objects_delete on storage.objects for delete to authenticated using (
-  bucket_id = 'ad-images' and exists (
-    select 1 from public.ad_images i join public.ads a on a.id = i.ad_id
-    where i.storage_path = name and i.owner_id = (select auth.uid()) and a.status = 'draft'
-  )
-);
--- No object UPDATE policy: replace photos with a new image ID to avoid stale signed URLs.
-revoke all on all functions in schema private from public,anon,authenticated;
-grant execute on function private.is_admin() to anon,authenticated;
-
-commit;
-```
-
-## supabase/migrations/202610300002_firebase_moderation.sql
-
-```sql
-begin;
-
-drop trigger if exists on_auth_user_created on auth.users;
-drop function if exists private.handle_new_user();
-
-drop policy if exists profiles_update on public.profiles;
-drop policy if exists settings_owner on public.user_settings;
-drop policy if exists roles_read on public.user_roles;
-drop policy if exists ads_read on public.ads;
-drop policy if exists ads_insert on public.ads;
-drop policy if exists ads_update on public.ads;
-drop policy if exists images_write on public.ad_images;
-drop policy if exists favorites_owner on public.favorites;
-drop policy if exists conversations_read on public.conversations;
-drop policy if exists conversations_create on public.conversations;
-drop policy if exists messages_insert on public.messages;
-drop policy if exists reports_read on public.reports;
-drop policy if exists reports_create on public.reports;
-drop policy if exists ad_objects_insert on storage.objects;
-drop policy if exists ad_objects_delete on storage.objects;
-
-alter table public.user_settings drop constraint if exists user_settings_user_id_fkey;
-alter table public.user_roles drop constraint if exists user_roles_user_id_fkey;
-alter table public.favorites drop constraint if exists favorites_user_id_fkey;
-alter table public.ads drop constraint if exists ads_seller_id_fkey;
-alter table public.ad_images drop constraint if exists ad_images_ad_id_owner_id_fkey;
-alter table public.conversations drop constraint if exists conversations_buyer_id_fkey;
-alter table public.conversations drop constraint if exists conversations_ad_id_seller_id_fkey;
-alter table public.conversations drop constraint if exists conversations_check;
-alter table public.messages drop constraint if exists messages_sender_id_fkey;
-alter table public.reports drop constraint if exists reports_reporter_id_fkey;
-alter table public.moderation_events drop constraint if exists moderation_events_actor_id_fkey;
-alter table public.profiles drop constraint if exists profiles_id_fkey;
-
-alter table public.profiles alter column id type text using id::text;
-alter table public.profiles add constraint profiles_id_length check (char_length(id) between 1 and 128);
-alter table public.user_settings alter column user_id type text using user_id::text;
-alter table public.user_roles alter column user_id type text using user_id::text;
-alter table public.favorites alter column user_id type text using user_id::text;
-alter table public.ads alter column seller_id type text using seller_id::text;
-alter table public.ad_images alter column owner_id type text using owner_id::text;
-alter table public.conversations alter column buyer_id type text using buyer_id::text;
-alter table public.conversations alter column seller_id type text using seller_id::text;
-alter table public.messages alter column sender_id type text using sender_id::text;
-alter table public.reports alter column reporter_id type text using reporter_id::text;
-alter table public.moderation_events alter column actor_id type text using actor_id::text;
-
-alter table public.user_settings
-  add constraint user_settings_user_id_fkey foreign key (user_id) references public.profiles(id) on delete cascade;
-alter table public.user_roles
-  add constraint user_roles_user_id_fkey foreign key (user_id) references public.profiles(id) on delete cascade;
-alter table public.favorites
-  add constraint favorites_user_id_fkey foreign key (user_id) references public.profiles(id) on delete cascade;
-alter table public.ads
-  add constraint ads_seller_id_fkey foreign key (seller_id) references public.profiles(id);
-alter table public.ad_images
-  add constraint ad_images_ad_id_owner_id_fkey foreign key (ad_id,owner_id) references public.ads(id,seller_id) on delete cascade;
-alter table public.conversations
-  add constraint conversations_buyer_id_fkey foreign key (buyer_id) references public.profiles(id);
-alter table public.conversations
-  add constraint conversations_ad_id_seller_id_fkey foreign key (ad_id,seller_id) references public.ads(id,seller_id);
-alter table public.conversations add constraint conversations_check check (buyer_id <> seller_id);
-alter table public.messages
-  add constraint messages_sender_id_fkey foreign key (sender_id) references public.profiles(id);
-alter table public.reports
-  add constraint reports_reporter_id_fkey foreign key (reporter_id) references public.profiles(id);
-alter table public.moderation_events
-  add constraint moderation_events_actor_id_fkey foreign key (actor_id) references public.profiles(id);
-
-alter table public.user_roles alter column role drop default;
-alter table public.user_roles drop constraint if exists user_roles_role_check;
-alter table public.user_roles
-  add constraint user_roles_role_check check (role in ('admin','moderator'));
-
-create table private.user_emails (
-  firebase_uid text primary key references public.profiles(id) on delete cascade,
-  email text not null check (char_length(email) between 3 and 320),
-  updated_at timestamptz not null default now()
-);
-revoke all on table private.user_emails from public,anon,authenticated;
-
-create or replace function private.current_user_id() returns text
-language sql stable set search_path = '' as $$
-  select nullif(auth.jwt()->>'sub','');
-$$;
-
-create or replace function private.is_admin() returns boolean
-language sql stable security definer set search_path = '' as $$
-  select exists (
-    select 1 from public.user_roles
-    where user_id = private.current_user_id() and role = 'admin'
-  );
-$$;
-
-create or replace function private.is_moderator() returns boolean
-language sql stable security definer set search_path = '' as $$
-  select exists (
-    select 1 from public.user_roles
-    where user_id = private.current_user_id() and role in ('admin','moderator')
-  );
-$$;
-
-create or replace function public.ensure_current_profile() returns void
-language plpgsql security definer set search_path = '' as $$
-declare
-  current_id text := private.current_user_id();
-  current_email text := nullif(auth.jwt()->>'email','');
-  current_name text := coalesce(
-    nullif(auth.jwt()->>'name',''),
-    nullif(split_part(coalesce(auth.jwt()->>'email',''), '@', 1),''),
-    'Seller'
-  );
-begin
-  if current_id is null or current_email is null
-    or coalesce((auth.jwt()->>'email_verified')::boolean,false) is not true then
-    raise exception 'A verified Firebase email is required';
-  end if;
-  insert into public.profiles(id,display_name)
-  values (current_id,left(current_name,80))
-  on conflict (id) do nothing;
-  insert into public.user_settings(user_id)
-  values (current_id)
-  on conflict (user_id) do nothing;
-  insert into private.user_emails(firebase_uid,email)
-  values (current_id,lower(current_email))
-  on conflict (firebase_uid) do update
-  set email = excluded.email, updated_at = now();
-end;
-$$;
-revoke all on function public.ensure_current_profile() from public,anon;
-grant execute on function public.ensure_current_profile() to authenticated;
-
-create or replace function public.admin_list_users()
-returns table (user_id text,email text,display_name text,role text)
-language plpgsql stable security definer set search_path = '' as $$
-begin
-  if not private.is_admin() then
-    raise exception 'Administrator access required' using errcode = '42501';
-  end if;
-  return query
-    select p.id,e.email,p.display_name,coalesce(r.role,'user')
-    from public.profiles p
-    join private.user_emails e on e.firebase_uid = p.id
-    left join public.user_roles r on r.user_id = p.id
-    order by p.created_at desc;
-end;
-$$;
-
-create or replace function public.admin_set_moderator(target_user_id text, enabled boolean)
-returns void
-language plpgsql security definer set search_path = '' as $$
-begin
-  if not private.is_admin() then
-    raise exception 'Administrator access required' using errcode = '42501';
-  end if;
-  if not exists (select 1 from public.profiles where id = target_user_id) then
-    raise exception 'User does not exist';
-  end if;
-  if exists (select 1 from public.user_roles where user_id = target_user_id and role = 'admin') then
-    raise exception 'Administrator roles are managed through trusted database administration';
-  end if;
-  if enabled then
-    insert into public.user_roles(user_id,role) values (target_user_id,'moderator')
-    on conflict (user_id) do update set role = 'moderator'
-    where public.user_roles.role = 'moderator';
-  else
-    delete from public.user_roles where user_id = target_user_id and role = 'moderator';
-  end if;
-end;
-$$;
-revoke all on function public.admin_list_users() from public,anon;
-revoke all on function public.admin_set_moderator(text,boolean) from public,anon;
-grant execute on function public.admin_list_users() to authenticated;
-grant execute on function public.admin_set_moderator(text,boolean) to authenticated;
-
-create table public.site_issues (
-  id uuid primary key default gen_random_uuid(),
-  reporter_id text not null references public.profiles(id),
-  title text not null check (char_length(btrim(title)) between 4 and 140),
-  details text not null check (char_length(btrim(details)) between 10 and 4000),
-  page_path text not null default '/' check (char_length(page_path) between 1 and 500),
-  severity text not null default 'medium' check (severity in ('low','medium','high','critical')),
-  status text not null default 'open' check (status in ('open','in_progress','resolved')),
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
-create index site_issues_status_idx on public.site_issues(status,created_at desc);
-create index site_issues_reporter_idx on public.site_issues(reporter_id);
-alter table public.site_issues enable row level security;
-revoke all on public.site_issues from anon,authenticated;
-grant select,insert,update on public.site_issues to authenticated;
-create policy issues_read on public.site_issues for select to authenticated
-  using (reporter_id = (select private.current_user_id()) or private.is_moderator());
-create policy issues_create on public.site_issues for insert to authenticated
-  with check (reporter_id = (select private.current_user_id()));
-create policy issues_admin_update on public.site_issues for update to authenticated
-  using (private.is_admin()) with check (private.is_admin());
-
-create or replace function private.guard_ad() returns trigger
-language plpgsql security definer set search_path = '' as $$
-begin
-  if TG_OP = 'INSERT' then
-    if not private.is_admin() then
-      new.status := 'draft';
-      new.created_at := now();
-      new.published_at := null;
-    end if;
-  else
-    if new.id <> old.id or new.seller_id <> old.seller_id or new.created_at <> old.created_at then
-      raise exception 'Ad identity and creation date cannot be changed';
-    end if;
-    if private.is_moderator() and not private.is_admin() then
-      if (new.title,new.description,new.price,new.category_id,new.location_id,new.condition,new.attributes,new.negotiable,new.slug)
-        is distinct from
-        (old.title,old.description,old.price,old.category_id,old.location_id,old.condition,old.attributes,old.negotiable,old.slug) then
-        raise exception 'Moderators can only review ad status';
-      end if;
-      if new.status is distinct from old.status
-        and not (old.status = 'pending' and new.status in ('active','rejected')) then
-        raise exception 'Moderators can only approve or reject pending ads';
-      end if;
-      if new.published_at is distinct from old.published_at then
-        raise exception 'Only moderation can set publication dates';
-      end if;
-    elsif not private.is_admin() then
-      if new.published_at is distinct from old.published_at then
-        raise exception 'Only moderation can set publication dates';
-      end if;
-      if new.status = 'active' and old.status <> 'active' then
-        raise exception 'Only admins or moderators can approve ads';
-      end if;
-      if new.status = 'rejected' and old.status <> 'rejected' then
-        raise exception 'Only admins or moderators can reject ads';
-      end if;
-      if new.status = 'sold' and old.status not in ('active','sold') then
-        raise exception 'Only published ads can be marked sold';
-      end if;
-      if (new.title,new.description,new.price,new.category_id,new.location_id,new.condition,new.attributes,new.negotiable,new.slug)
-        is distinct from
-        (old.title,old.description,old.price,old.category_id,old.location_id,old.condition,old.attributes,old.negotiable,old.slug)
-        and old.status in ('active','sold','rejected') then
-        new.status := 'draft';
-      end if;
-    end if;
-    if new.status = 'active' and old.status <> 'active' then
-      new.published_at := now();
-    end if;
-  end if;
-  if new.status in ('pending','active') then
-    if not exists (
-      select 1 from public.ad_images i join storage.objects o
-      on o.bucket_id = 'ad-images' and o.name = i.storage_path where i.ad_id = new.id
-    ) then
-      raise exception 'Upload at least one photo before submitting';
-    end if;
-    if not exists (select 1 from public.locations where id = new.location_id and level = 'area') then
-      raise exception 'Select an area before submitting';
-    end if;
-  end if;
-  new.updated_at := now();
-  return new;
-end;
-$$;
-
-create or replace function private.audit_ad() returns trigger
-language plpgsql security definer set search_path = '' as $$
-begin
-  if new.status is distinct from old.status then
-    insert into public.moderation_events(ad_id,actor_id,from_status,to_status)
-    values (new.id,private.current_user_id(),old.status,new.status);
-  end if;
-  return new;
-end;
-$$;
-
-drop policy if exists profiles_update on public.profiles;
-create policy profiles_update on public.profiles for update to authenticated
-  using (id = (select private.current_user_id()))
-  with check (id = (select private.current_user_id()));
-
-drop policy if exists settings_owner on public.user_settings;
-create policy settings_owner on public.user_settings for all to authenticated
-  using (user_id = (select private.current_user_id()))
-  with check (user_id = (select private.current_user_id()));
-
-drop policy if exists roles_read on public.user_roles;
-create policy roles_read on public.user_roles for select to authenticated
-  using (user_id = (select private.current_user_id()) or private.is_admin());
-create policy roles_admin_manage on public.user_roles for all to authenticated
-  using (private.is_admin()) with check (private.is_admin());
-
-drop policy if exists ads_read on public.ads;
-create policy ads_read on public.ads for select
-  using (status = 'active' or seller_id = (select private.current_user_id()) or private.is_moderator());
-
-drop policy if exists ads_insert on public.ads;
-create policy ads_insert on public.ads for insert to authenticated
-  with check (seller_id = (select private.current_user_id()) and status = 'draft');
-
-drop policy if exists ads_update on public.ads;
-create policy ads_update on public.ads for update to authenticated
-  using (seller_id = (select private.current_user_id()) or private.is_moderator())
-  with check (seller_id = (select private.current_user_id()) or private.is_moderator());
-
-drop policy if exists images_write on public.ad_images;
-create policy images_write on public.ad_images for all to authenticated
-  using (owner_id = (select private.current_user_id()) and exists (
-    select 1 from public.ads a where a.id = ad_id and a.seller_id = (select private.current_user_id()) and a.status = 'draft'
-  ))
-  with check (owner_id = (select private.current_user_id()) and exists (
-    select 1 from public.ads a where a.id = ad_id and a.seller_id = (select private.current_user_id()) and a.status = 'draft'
-  ));
-
-drop policy if exists favorites_owner on public.favorites;
-create policy favorites_owner on public.favorites for all to authenticated
-  using (user_id = (select private.current_user_id()))
-  with check (user_id = (select private.current_user_id()));
-
-drop policy if exists conversations_read on public.conversations;
-create policy conversations_read on public.conversations for select to authenticated
-  using ((select private.current_user_id()) in (buyer_id,seller_id));
-
-drop policy if exists conversations_create on public.conversations;
-create policy conversations_create on public.conversations for insert to authenticated
-  with check (buyer_id = (select private.current_user_id()) and exists (
-    select 1 from public.ads a
-    where a.id = conversations.ad_id and a.seller_id = conversations.seller_id and a.status = 'active'
-  ));
-
-drop policy if exists messages_insert on public.messages;
-create policy messages_insert on public.messages for insert to authenticated
-  with check (sender_id = (select private.current_user_id()) and exists (
-    select 1 from public.conversations c where c.id = conversation_id
-  ));
-
-drop policy if exists reports_read on public.reports;
-create policy reports_read on public.reports for select to authenticated
-  using (reporter_id = (select private.current_user_id()) or private.is_admin());
-
-drop policy if exists reports_create on public.reports;
-create policy reports_create on public.reports for insert to authenticated
-  with check (reporter_id = (select private.current_user_id()) and resolved = false and exists (
-    select 1 from public.ads a where a.id = ad_id and a.status = 'active'
-  ));
-
-drop policy if exists ad_objects_insert on storage.objects;
-create policy ad_objects_insert on storage.objects for insert to authenticated
-  with check (
-    bucket_id = 'ad-images' and exists (
-      select 1 from public.ad_images i join public.ads a on a.id = i.ad_id
-      where i.storage_path = name and i.owner_id = (select private.current_user_id()) and a.status = 'draft'
-    )
-  );
-
-drop policy if exists ad_objects_delete on storage.objects;
-create policy ad_objects_delete on storage.objects for delete to authenticated
-  using (
-    bucket_id = 'ad-images' and exists (
-      select 1 from public.ad_images i join public.ads a on a.id = i.ad_id
-      where i.storage_path = name and i.owner_id = (select private.current_user_id()) and a.status = 'draft'
-    )
-  );
-
-grant insert,update,delete on public.user_roles to authenticated;
-revoke all on function private.current_user_id() from public,anon,authenticated;
-revoke all on function private.is_admin() from public,anon,authenticated;
-revoke all on function private.is_moderator() from public,anon,authenticated;
-grant execute on function private.current_user_id() to anon,authenticated;
-grant execute on function private.is_admin() to anon,authenticated;
-grant execute on function private.is_moderator() to anon,authenticated;
-
-commit;
-```
-
-## supabase/seed.sql
-
-```sql
--- Safe to rerun. Production reference data, plus explicitly marked demo locations.
-begin;
-insert into public.categories (slug,name_en,name_bn,icon,sort_order,field_definitions) values
-('mobiles','Mobiles','মোবাইল','smartphone',1,'[{"key":"brand","type":"text","required":true},{"key":"model","type":"text","required":true}]'),
-('electronics','Electronics','ইলেকট্রনিক্স','monitor',2,'[]'),
-('vehicles','Vehicles','যানবাহন','car',3,'[{"key":"brand","type":"text","required":true},{"key":"model","type":"text","required":true},{"key":"year","type":"integer","required":true},{"key":"mileage","type":"integer","required":true}]'),
-('property','Property','প্রপার্টি','building',4,'[]'),
-('home-living','Home & Living','ঘর ও গৃহস্থালি','house',5,'[]'),
-('fashion','Fashion','ফ্যাশন','shirt',6,'[]'),
-('furniture','Furniture','আসবাবপত্র','armchair',7,'[]'),
-('jobs','Jobs','চাকরি','briefcase',8,'[]'),
-('services','Services','সেবা','wrench',9,'[]'),
-('pets','Pets','পোষা প্রাণী','paw-print',10,'[]'),
-('sports-hobbies','Sports & Hobbies','খেলাধুলা ও শখ','bike',11,'[]'),
-('books-education','Books & Education','বই ও শিক্ষা','book-open',12,'[]')
-on conflict (slug) do nothing;
-
-insert into public.categories (parent_id,slug,name_en,name_bn,icon)
-select id,'mobile-phones','Mobile Phones','মোবাইল ফোন','smartphone'
-from public.categories where slug = 'mobiles' on conflict (slug) do nothing;
-insert into public.categories (parent_id,slug,name_en,name_bn,icon)
-select id,'cars','Cars','গাড়ি','car'
-from public.categories where slug = 'vehicles' on conflict (slug) do nothing;
-
-insert into public.locations (slug,level,name_en,name_bn) values
-('dhaka-division','division','Dhaka','ঢাকা'),
-('chattogram-division','division','Chattogram','চট্টগ্রাম'),
-('rajshahi-division','division','Rajshahi','রাজশাহী'),
-('khulna-division','division','Khulna','খুলনা'),
-('barishal-division','division','Barishal','বরিশাল'),
-('sylhet-division','division','Sylhet','সিলেট'),
-('rangpur-division','division','Rangpur','রংপুর'),
-('mymensingh-division','division','Mymensingh','ময়মনসিংহ')
-on conflict (slug) do nothing;
-
--- DEMO ONLY: this is not a complete district/area dataset for Bangladesh.
-insert into public.locations (parent_id,slug,level,name_en,name_bn)
-select id,'dhaka-district','district','Dhaka','ঢাকা'
-from public.locations where slug = 'dhaka-division' on conflict (slug) do nothing;
-insert into public.locations (parent_id,slug,level,name_en,name_bn)
-select id,'dhaka-mirpur','area','Mirpur','মিরপুর'
-from public.locations where slug = 'dhaka-district' on conflict (slug) do nothing;
-insert into public.locations (parent_id,slug,level,name_en,name_bn)
-select id,'dhaka-dhanmondi','area','Dhanmondi','ধানমন্ডি'
-from public.locations where slug = 'dhaka-district' on conflict (slug) do nothing;
-commit;
-```
-
-## supabase/tests/bootstrap.sql
-
-```sql
--- TEST ONLY. Minimal Supabase contract stubs; never run in a real Supabase project.
-\set ON_ERROR_STOP on
-do $$ begin
-  if current_database() <> 'turnover_phase3_test' then
-    raise exception 'Run only in a disposable database named turnover_phase3_test';
-  end if;
-end $$;
-do $$ begin
-  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
-  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
-end $$;
-create schema auth;
-create table auth.users (id uuid primary key);
-create function auth.uid() returns uuid language sql stable as $$
-  select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid;
-$$;
-create function auth.jwt() returns jsonb language sql stable as $$
-  select coalesce(
-    nullif(current_setting('request.jwt.claims',true),'')::jsonb,
-    jsonb_build_object('sub',nullif(current_setting('request.jwt.claim.sub',true),''))
-  );
-$$;
-grant usage on schema auth to anon,authenticated;
-grant execute on function auth.uid() to anon,authenticated;
-grant execute on function auth.jwt() to anon,authenticated;
-create schema storage;
-create table storage.buckets (
-  id text primary key, name text, public boolean,
-  file_size_limit bigint, allowed_mime_types text[]
-);
-create table storage.objects (id uuid primary key default gen_random_uuid(), bucket_id text, name text);
-alter table storage.objects enable row level security;
-grant usage on schema storage to anon,authenticated;
-grant select,insert,update,delete on storage.objects to anon,authenticated;
-```
-
-## supabase/tests/migration_fixture.sql
-
-```sql
--- TEST ONLY. Run after the initial schema to confirm UUID-based legacy profiles survive migration 002.
-\set ON_ERROR_STOP on
-insert into auth.users(id) values ('90000000-0000-0000-0000-000000000001');
-```
-
-## supabase/tests/security.sql
-
-```sql
--- TEST ONLY, run after bootstrap + both migrations + seed on the disposable database.
-\set ON_ERROR_STOP on
-begin;
-create function pg_temp.assert_true(value boolean, label text) returns void
-language plpgsql as $$ begin
-  if value is distinct from true then raise exception 'FAIL: %',label; end if;
-end $$;
-create function pg_temp.assert_raises(statement text, expected_state text) returns void
-language plpgsql as $$
-declare caught boolean := false;
-begin
-  begin execute statement;
-  exception when others then
-    if SQLSTATE <> expected_state then raise; end if;
-    caught := true;
-  end;
-  if not caught then raise exception 'FAIL: statement should fail: %',statement; end if;
-end $$;
-
-insert into public.profiles(id,display_name) values
-('firebase-seller-001','Seller'),
-('firebase-buyer-001','Buyer'),
-('firebase-outsider-001','Outsider'),
-('firebase-admin-001','Admin'),
-('firebase-moderator-001','Moderator');
-insert into public.user_settings(user_id) values
-('firebase-seller-001'),('firebase-buyer-001'),('firebase-outsider-001'),
-('firebase-admin-001'),('firebase-moderator-001');
-insert into private.user_emails(firebase_uid,email) values
-('firebase-seller-001','seller@example.com'),
-('firebase-buyer-001','buyer@example.com'),
-('firebase-outsider-001','outsider@example.com'),
-('firebase-admin-001','admin@example.com'),
-('firebase-moderator-001','moderator@example.com');
-insert into public.user_roles(user_id,role) values
-('firebase-admin-001','admin'),
-('firebase-moderator-001','moderator');
-select pg_temp.assert_true((select count(*) = 12 from public.categories where parent_id is null),'12 categories');
-select pg_temp.assert_true((select count(*) = 8 from public.locations where level = 'division'),'8 divisions');
-select pg_temp.assert_true((select count(*) = 1 from public.profiles where id = '90000000-0000-0000-0000-000000000001'),'legacy UUID profile preserved as text');
-select pg_temp.assert_true((select count(*) = 1 from public.user_settings where user_id = '90000000-0000-0000-0000-000000000001'),'legacy settings preserved as text');
-
-set local role authenticated;
-select set_config('request.jwt.claims','{"sub":"firebase-new-user-001","email":"new@example.com","email_verified":true,"role":"authenticated"}',true);
-select public.ensure_current_profile();
-select pg_temp.assert_true((select count(*) = 1 from public.profiles where id = 'firebase-new-user-001'),'Firebase UID profile provisioned');
-select pg_temp.assert_true((select count(*) = 1 from public.user_settings where user_id = 'firebase-new-user-001'),'Firebase UID settings provisioned');
-select set_config('request.jwt.claims','{"sub":"firebase-seller-001","email":"seller@example.com","role":"authenticated"}',true);
-insert into public.ads(id,seller_id,category_id,location_id,title,description,price,condition)
-select '20000000-0000-0000-0000-000000000001',private.current_user_id(),c.id,l.id,
-'Phone for sale','A used phone with its original box and charging cable.',55000,'used'
-from public.categories c,public.locations l where c.slug = 'mobiles' and l.slug = 'dhaka-mirpur';
-select pg_temp.assert_raises($q$update public.profiles set contact_verified = true where id = private.current_user_id()$q$,'42501');
-select pg_temp.assert_raises($q$insert into public.user_roles(user_id,role) values(private.current_user_id(),'admin')$q$,'42501');
-select pg_temp.assert_raises($q$update public.ads set status = 'active'$q$,'P0001');
-select pg_temp.assert_raises($q$update public.user_settings set phone = '01212345678'$q$,'23514');
-insert into public.ad_images(id,ad_id,owner_id,position,storage_path) values (
-'30000000-0000-0000-0000-000000000001','20000000-0000-0000-0000-000000000001',private.current_user_id(),0,
-'firebase-seller-001/20000000-0000-0000-0000-000000000001/30000000-0000-0000-0000-000000000001.webp');
-insert into storage.objects(bucket_id,name) select 'ad-images',storage_path from public.ad_images;
-select pg_temp.assert_raises($q$insert into public.ad_images(ad_id,owner_id,position,storage_path) values ('20000000-0000-0000-0000-000000000001',private.current_user_id(),8,'bad')$q$,'23514');
-update public.ads set status = 'pending';
-
-set local role anon;
-select set_config('request.jwt.claims','{}',true);
-select pg_temp.assert_true((select count(*) = 0 from public.ads),'pending ads hidden from guests');
-select pg_temp.assert_true((select count(*) = 0 from storage.objects),'pending photos hidden from guests');
-select pg_temp.assert_raises($q$select * from public.user_settings$q$,'42501');
-
-set local role authenticated;
-select set_config('request.jwt.claims','{"sub":"firebase-moderator-001","email":"moderator@example.com","role":"authenticated"}',true);
-select pg_temp.assert_true((select count(*) = 1 from public.ads where status = 'pending'),'moderators can review pending ads');
-select pg_temp.assert_raises($q$update public.ads set price = 1$q$,'P0001');
-select pg_temp.assert_raises($q$insert into public.user_roles(user_id,role) values('firebase-outsider-001','moderator')$q$,'42501');
-select pg_temp.assert_raises($q$select public.admin_list_users()$q$,'42501');
-update public.ads set status = 'active';
-insert into public.site_issues(reporter_id,title,details,page_path,severity)
-values (private.current_user_id(),'Search results broken','Searching a keyword shows no results even when matching listings exist.','/search','high');
-update public.site_issues set status = 'resolved';
-select pg_temp.assert_true((select count(*) = 1 from public.site_issues where status = 'open'),'moderators can report issues but cannot triage them');
-select pg_temp.assert_raises($q$insert into public.reports(ad_id,reporter_id,reason,resolved) values ('20000000-0000-0000-0000-000000000001',private.current_user_id(),'spam',true)$q$,'42501');
-
-set local role anon;
-select set_config('request.jwt.claims','{}',true);
-select pg_temp.assert_true((select count(*) = 1 from public.ads),'approved ad visible to guests');
-select pg_temp.assert_true((select count(*) = 1 from storage.objects),'approved photo visible to guests');
-
-set local role authenticated;
-select set_config('request.jwt.claims','{"sub":"firebase-admin-001","email":"admin@example.com","role":"authenticated"}',true);
-select pg_temp.assert_true((select count(*) = 6 from public.admin_list_users()),'admin can view user directory');
-select pg_temp.assert_true((select email = 'new@example.com' from public.admin_list_users() where user_id = 'firebase-new-user-001'),'admin can resolve private account email');
-select pg_temp.assert_true((select count(*) = 1 from public.moderation_events where actor_id = 'firebase-moderator-001'),'moderation audit records Firebase UID');
-select public.admin_set_moderator('firebase-outsider-001',true);
-select pg_temp.assert_true((select role = 'moderator' from public.user_roles where user_id = 'firebase-outsider-001'),'admin can assign moderator role');
-select public.admin_set_moderator('firebase-outsider-001',false);
-select pg_temp.assert_true((select count(*) = 0 from public.user_roles where user_id = 'firebase-outsider-001'),'admin can revoke moderator role');
-select pg_temp.assert_raises($q$select public.admin_set_moderator('firebase-admin-001',false)$q$,'P0001');
-update public.site_issues set status = 'resolved';
-select pg_temp.assert_true((select count(*) = 1 from public.site_issues where status = 'resolved'),'admin can resolve issues');
-select pg_temp.assert_true((select count(*) = 2 from public.moderation_events),'admin can inspect moderation audit');
-
-set local role authenticated;
-select set_config('request.jwt.claims','{"sub":"firebase-buyer-001","email":"buyer@example.com","role":"authenticated"}',true);
-select pg_temp.assert_true((select count(*) = 1 from public.user_settings),'settings owner only');
-select pg_temp.assert_raises($q$select * from private.user_emails$q$,'42501');
-select pg_temp.assert_raises($q$insert into public.reports(ad_id,reporter_id,reason,resolved) values ('20000000-0000-0000-0000-000000000001',private.current_user_id(),'spam',true)$q$,'42501');
-insert into public.reports(ad_id,reporter_id,reason) values ('20000000-0000-0000-0000-000000000001',private.current_user_id(),'spam');
-insert into public.conversations(id,ad_id,buyer_id,seller_id) values (
-'40000000-0000-0000-0000-000000000001','20000000-0000-0000-0000-000000000001',private.current_user_id(),'firebase-seller-001');
-insert into public.messages(conversation_id,sender_id,body) values ('40000000-0000-0000-0000-000000000001',private.current_user_id(),'Is this available?');
-select pg_temp.assert_raises($q$insert into public.messages(conversation_id,sender_id,body) values ('40000000-0000-0000-0000-000000000001','firebase-seller-001','Forged message')$q$,'42501');
-
-select set_config('request.jwt.claims','{"sub":"firebase-outsider-001","email":"outsider@example.com","role":"authenticated"}',true);
-select pg_temp.assert_true((select count(*) = 0 from public.messages),'outsider cannot read chat');
-select pg_temp.assert_true((select count(*) = 0 from public.conversations),'outsider cannot read conversations');
-select pg_temp.assert_raises($q$insert into public.messages(conversation_id,sender_id,body) values ('40000000-0000-0000-0000-000000000001',private.current_user_id(),'Intrusion')$q$,'42501');
-
-select set_config('request.jwt.claims','{"sub":"firebase-seller-001","email":"seller@example.com","role":"authenticated"}',true);
-select pg_temp.assert_raises($q$insert into storage.objects(bucket_id,name) select 'ad-images',storage_path from public.ad_images$q$,'42501');
-delete from public.ad_images;
-select pg_temp.assert_true((select count(*) = 1 from public.ad_images),'published photo cannot be removed');
-update public.ads set price = 54000;
-select pg_temp.assert_true((select status = 'draft' from public.ads limit 1),'editing published content requires reapproval');
-set local role anon;
-select set_config('request.jwt.claims','{}',true);
-select pg_temp.assert_true((select count(*) = 0 from public.ads),'edited ad becomes private');
-select pg_temp.assert_true((select count(*) = 0 from storage.objects),'edited photos become private');
-rollback;
-\echo 'All TurnOver database security checks passed.'
 ```
 

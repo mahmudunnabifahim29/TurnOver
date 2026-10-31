@@ -1,13 +1,13 @@
 {
-  "name": "turnover-auth-bridge",
+  "name": "turnover-firebase-functions",
   "private": true,
   "type": "module",
   "main": "index.js",
   "engines": {
-    "node": "22"
+    "node": ">=22"
   },
   "scripts": {
-    "deploy": "firebase deploy --only functions:ensureSupabaseAuthenticatedRole"
+    "deploy": "firebase deploy --only functions"
   },
   "dependencies": {
     "firebase-admin": "^14.5.0",

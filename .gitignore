@@ -1,12 +1,12 @@
 node_modules/
 .next/
+.open-next/
+.wrangler/
 out/
 .env*
 !.env.example
 *.tsbuildinfo
 .DS_Store
-.vercel/
-supabase/.temp/
 functions/node_modules/
 .firebase/
 firebase-debug.log

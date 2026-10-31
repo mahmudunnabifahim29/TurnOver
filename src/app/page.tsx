@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { cookies } from "next/headers";
-import { getHomepageCategories } from "@/lib/categories";
-import { getHomepageListings, getHomepageLocations } from "@/lib/listings";
+import { getHomepageCategories, getHomepageListings, getHomepageLocations } from "@/lib/listings";
 import { formatBDT } from "@/lib/format";
 import type { Locale } from "@/components/locale-switcher";
 

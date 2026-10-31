@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
-import { getRedirectResult, GoogleAuthProvider, onAuthStateChanged, sendSignInLinkToEmail, signInWithEmailLink, signInWithPopup, signInWithRedirect, signOut, type User } from "@firebase/auth";
+import { createUserWithEmailAndPassword, getRedirectResult, GoogleAuthProvider, onAuthStateChanged, sendEmailVerification, sendSignInLinkToEmail, signInWithEmailAndPassword, signInWithEmailLink, signInWithPopup, signInWithRedirect, signOut, type User } from "@firebase/auth";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/client";
 import { prepareUserForMarketplace } from "@/lib/firebase/prepare-user";
@@ -21,6 +21,8 @@ function messageForError(error: unknown): string {
         return "An account already exists with this email. Sign in using the provider you originally used.";
       case "auth/cancelled-popup-request":
         return "A Google sign-in attempt is already open. Finish that window or close it before trying again.";
+      case "auth/weak-password":
+        return "Use at least 8 characters with uppercase and lowercase letters, a number, and a special character.";
     }
   }
   return error instanceof Error ? error.message : "Something went wrong. Please try again.";
@@ -32,11 +34,26 @@ function getAuthErrorCode(error: unknown): string | null {
     : null;
 }
 
+function validatePassword(password: string): string | null {
+  const requirements = [
+    [password.length >= 8, "at least 8 characters"],
+    [/[A-Z]/.test(password), "an uppercase letter"],
+    [/[a-z]/.test(password), "a lowercase letter"],
+    [/\d/.test(password), "a number"],
+    [/[^A-Za-z0-9]/.test(password), "a special character"],
+  ] as const;
+  const missing = requirements.filter(([valid]) => !valid).map(([, requirement]) => requirement);
+  return missing.length ? `Password must include ${missing.join(", ")}.` : null;
+}
+
 export default function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const configured = isFirebaseConfigured();
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [authMethod, setAuthMethod] = useState<"email-link" | "password">("email-link");
+  const [passwordAction, setPasswordAction] = useState<"signin" | "signup">("signin");
   const [user, setUser] = useState<User | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -115,6 +132,26 @@ export default function LoginForm() {
       const normalizedEmail = email.trim().toLowerCase();
       if (!normalizedEmail) throw new Error("Enter your email address.");
 
+      if (authMethod === "password") {
+        if (passwordAction === "signup") {
+          const passwordError = validatePassword(password);
+          if (passwordError) throw new Error(passwordError);
+          const credential = await createUserWithEmailAndPassword(auth, normalizedEmail, password);
+          await sendEmailVerification(credential.user);
+          await signOut(auth);
+          setUser(null);
+          setPassword("");
+          setNotice("Account created. Verify your email using the link we sent, then sign in with your password.");
+          return;
+        }
+
+        const credential = await signInWithEmailAndPassword(auth, normalizedEmail, password);
+        setUser(credential.user);
+        await prepareUserForMarketplace(credential.user);
+        router.replace(nextPath);
+        return;
+      }
+
       if (isLink) {
         const signedIn = await signInWithEmailLink(auth, normalizedEmail, window.location.href);
         window.localStorage.removeItem("turnover-signin-email");
@@ -142,8 +179,30 @@ export default function LoginForm() {
     setBusy(true);
     setError("");
     try {
-      await prepareUserForMarketplace(user);
+      await user.reload();
+      const currentUser = getFirebaseAuth().currentUser;
+      if (!currentUser?.emailVerified) {
+        setError("Verify your email using the link we sent, then select continue again.");
+        return;
+      }
+      setUser(currentUser);
+      await prepareUserForMarketplace(currentUser);
       router.replace(nextPath);
+    } catch (caught) {
+      setError(messageForError(caught));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resendVerificationEmail() {
+    if (!user) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      await sendEmailVerification(user);
+      setNotice("Verification email sent. Check your inbox and spam folder.");
     } catch (caught) {
       setError(messageForError(caught));
     } finally {
@@ -170,7 +229,7 @@ export default function LoginForm() {
             {isLink ? "Finish signing in" : "Welcome to TurnOver"}
           </h1>
           <p className="mt-3 max-w-md text-sm leading-6 text-slate-600">
-            New here or returning? Continue with Google or use a one-time email link. First-time sign-in creates your account automatically.
+            Sign up with email and password, or continue with Google or a one-time email link.
           </p>
 
           {user ? (
@@ -178,11 +237,17 @@ export default function LoginForm() {
               <p className="rounded-xl bg-emerald-50 p-4 text-sm text-emerald-950">
                 Signed in as <span className="font-semibold">{user.email}</span>.
               </p>
+              {!user.emailVerified && (
+                <div className="rounded-xl bg-amber-50 p-4 text-sm leading-6 text-amber-950">
+                  Verify your email before using TurnOver. Open the verification link in your inbox, then continue.
+                  <button className="mt-3 block font-bold text-emerald-800 underline disabled:opacity-60" disabled={busy} onClick={resendVerificationEmail} type="button">Resend verification email</button>
+                </div>
+              )}
               {error && <p aria-live="assertive" className="rounded-xl bg-rose-50 p-3 text-sm leading-6 text-rose-800">{error}</p>}
               <button className="min-h-12 w-full rounded-xl bg-emerald-700 px-5 text-sm font-bold text-white hover:bg-emerald-800 disabled:opacity-60" disabled={busy} onClick={finishMarketplaceSetup} type="button">
                 {busy ? "Connecting your account…" : "Continue to TurnOver"}
               </button>
-              <p className="text-center text-xs leading-5 text-slate-500">First time here? Google sign-in creates your account automatically.</p>
+              <p className="text-center text-xs leading-5 text-slate-500">{user.emailVerified ? "Your account is ready to use." : "After verifying your inbox, select continue to refresh your account."}</p>
               <button className="w-full py-2 text-sm font-semibold text-slate-600 hover:text-slate-900" onClick={leaveAccount} type="button">
                 Use another account
               </button>
@@ -210,6 +275,12 @@ export default function LoginForm() {
                   OR USE EMAIL
                   <span className="h-px flex-1 bg-slate-200" />
                 </div>
+                {!isLink && (
+                  <div className="flex gap-2 rounded-xl bg-slate-100 p-1">
+                    <button className={`min-h-10 flex-1 rounded-lg text-sm font-semibold ${authMethod === "email-link" ? "bg-white text-emerald-800 shadow-sm" : "text-slate-600"}`} onClick={() => { setAuthMethod("email-link"); setError(""); setNotice(""); }} type="button">Email link</button>
+                    <button className={`min-h-10 flex-1 rounded-lg text-sm font-semibold ${authMethod === "password" ? "bg-white text-emerald-800 shadow-sm" : "text-slate-600"}`} onClick={() => { setAuthMethod("password"); setError(""); setNotice(""); }} type="button">Password</button>
+                  </div>
+                )}
                 <label className="block text-sm font-semibold text-slate-800" htmlFor="email">Email address</label>
                 <input
                   autoComplete="email"
@@ -221,8 +292,29 @@ export default function LoginForm() {
                   type="email"
                   value={email}
                 />
+                {authMethod === "password" && (
+                  <>
+                    <label className="block text-sm font-semibold text-slate-800" htmlFor="password">Password</label>
+                    <input
+                      autoComplete={passwordAction === "signup" ? "new-password" : "current-password"}
+                      className="min-h-12 w-full rounded-xl border border-slate-300 px-4 text-sm outline-none focus:border-emerald-700 focus:ring-2 focus:ring-emerald-100"
+                      id="password"
+                      minLength={8}
+                      onChange={(event) => setPassword(event.target.value)}
+                      required
+                      type="password"
+                      value={password}
+                    />
+                    {passwordAction === "signup" && (
+                      <p className="text-xs leading-5 text-slate-500">Use at least 8 characters with uppercase, lowercase, a number, and a special character.</p>
+                    )}
+                    <button className="w-full text-left text-sm font-semibold text-emerald-800 hover:underline" onClick={() => { setPasswordAction(passwordAction === "signin" ? "signup" : "signin"); setPassword(""); setError(""); setNotice(""); }} type="button">
+                      {passwordAction === "signin" ? "Create an account" : "Already have an account? Sign in"}
+                    </button>
+                  </>
+                )}
                 <button className="min-h-12 w-full rounded-xl bg-emerald-700 px-5 text-sm font-bold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-60" disabled={busy} type="submit">
-                  {busy ? "Please wait…" : isLink ? "Verify email and sign in" : "Email me a sign-in link"}
+                  {busy ? "Please wait…" : isLink ? "Verify email and sign in" : authMethod === "password" ? passwordAction === "signup" ? "Create account" : "Sign in with password" : "Email me a sign-in link"}
                 </button>
                 {notice && <p aria-live="polite" className="rounded-xl bg-emerald-50 p-3 text-sm leading-6 text-emerald-900">{notice}</p>}
                 {error && <p aria-live="assertive" className="rounded-xl bg-rose-50 p-3 text-sm leading-6 text-rose-800">{error}</p>}

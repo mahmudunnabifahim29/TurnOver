@@ -1,12 +1,13 @@
 "use client";
 
-import { onAuthStateChanged, type User } from "@firebase/auth";
+import { getIdTokenResult, onAuthStateChanged, type User } from "@firebase/auth";
+import { httpsCallable } from "@firebase/functions";
+import Image from "next/image";
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { formatBDT } from "@/lib/format";
-import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/client";
+import { getFirebaseAuth, getFirebaseDb, getFirebaseFunctions, isFirebaseConfigured } from "@/lib/firebase/client";
 import { prepareUserForMarketplace } from "@/lib/firebase/prepare-user";
-import { createClient } from "@/lib/supabase/client";
 
 type Role = "admin" | "moderator";
 type Tab = "overview" | "ads" | "products" | "categories" | "issues" | "reports" | "users";
@@ -19,7 +20,7 @@ type AdRow = {
   price: number;
   condition: string;
   created_at: string;
-  photos?: { storage_path: string; position: number }[] | null;
+  images?: { key: string; position: number }[] | null;
   photoUrl?: string | null;
   category: { name_en: string }[] | null;
   location: { name_en: string }[] | null;
@@ -61,11 +62,39 @@ type CategoryRow = {
 };
 
 type Counts = { pendingAds: number; activeAds: number; openIssues: number; openReports: number };
+type FirestoreRow = Record<string, unknown>;
 
 const dateFormatter = new Intl.DateTimeFormat("en-BD", { dateStyle: "medium", timeStyle: "short" });
+const ownerEmail = "mahmudunnabifahim3579@gmail.com";
 
 function messageForError(error: unknown): string {
   return error instanceof Error ? error.message : "Something went wrong. Please try again.";
+}
+
+function toAdRow(id: string, value: FirestoreRow): AdRow {
+  const images = Array.isArray(value.images)
+    ? value.images.filter((image): image is { key: string; position: number } =>
+      typeof image === "object" && image !== null &&
+      "key" in image && typeof image.key === "string" &&
+      "position" in image && typeof image.position === "number")
+    : [];
+  return {
+    id,
+    title: String(value.title ?? ""),
+    description: String(value.description ?? ""),
+    status: String(value.status ?? "draft"),
+    price: Number(value.price ?? 0),
+    condition: String(value.condition ?? "used"),
+    created_at: String(value.created_at ?? new Date(0).toISOString()),
+    images,
+    category: [{ name_en: String(value.category_name_en ?? "Marketplace") }],
+    location: [{ name_en: String(value.location_name_en ?? "Bangladesh") }],
+    seller: [{ display_name: String(value.seller_display_name ?? "Seller") }],
+  };
+}
+
+function listingImageUrl(key: string): string {
+  return `/api/listing-images/${key.split("/").map(encodeURIComponent).join("/")}`;
 }
 
 function Panel({ children, className = "" }: { children: ReactNode; className?: string }) {
@@ -77,6 +106,49 @@ function EmptyState({ title, text }: { title: string; text: string }) {
     <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-5 py-10 text-center">
       <p className="font-semibold text-slate-900">{title}</p>
       <p className="mt-2 text-sm leading-6 text-slate-600">{text}</p>
+    </div>
+  );
+}
+
+function StaffListingPhoto({ url, title }: { url: string; title: string }) {
+  const [source, setSource] = useState("");
+  const [loadError, setLoadError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl = "";
+    const controller = new AbortController();
+    async function loadPhoto() {
+      try {
+        const currentUser = getFirebaseAuth().currentUser;
+        if (!currentUser) throw new Error("Sign in to view this private listing photo.");
+        const token = await currentUser.getIdToken();
+        const response = await fetch(url, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`Could not load listing photo (${response.status}).`);
+        objectUrl = URL.createObjectURL(await response.blob());
+        if (active) setSource(objectUrl);
+      } catch (caught) {
+        if (active && !controller.signal.aborted) {
+          setLoadError(caught instanceof Error ? caught.message : "Could not load listing photo.");
+        }
+      }
+    }
+    void loadPhoto();
+    return () => {
+      active = false;
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [url]);
+
+  return (
+    <div className="flex aspect-[4/3] w-full shrink-0 items-center justify-center overflow-hidden rounded-xl bg-slate-100 sm:w-44">
+      {source
+        ? <Image alt={`Photo of ${title}`} className="h-full w-full object-cover" height={300} src={source} unoptimized width={400} />
+        : <span className="px-3 text-center text-xs text-slate-500">{loadError || "Loading private photo…"}</span>}
     </div>
   );
 }
@@ -124,6 +196,7 @@ export default function AdminWorkspace({
   const [counts, setCounts] = useState<Counts>({ pendingAds: 0, activeAds: 0, openIssues: 0, openReports: 0 });
   const [connectedAt, setConnectedAt] = useState("");
   const [loading, setLoading] = useState(true);
+  const [bootstrapping, setBootstrapping] = useState(false);
   const [accessDenied, setAccessDenied] = useState(false);
   const [busyId, setBusyId] = useState("");
   const [notice, setNotice] = useState("");
@@ -131,56 +204,65 @@ export default function AdminWorkspace({
 
   const loadWorkspace = useCallback(async (currentRole: Role) => {
     setError("");
-    const supabase = createClient();
+    const firestore = await import("@firebase/firestore");
+    const db = await getFirebaseDb();
     const [adsResult, issuesResult, pendingCount, activeCount, issueCount] = await Promise.all([
-      supabase.from("ads")
-        .select("id,title,description,status,price,condition,created_at,category:categories(name_en),location:locations(name_en),seller:profiles(display_name),photos:ad_images(storage_path,position)")
-        .eq("status", "pending")
-        .order("created_at", { ascending: true })
-        .limit(50),
-      supabase.from("site_issues").select("id,title,details,page_path,severity,status,created_at").order("created_at", { ascending: false }).limit(50),
-      supabase.from("ads").select("id", { count: "exact", head: true }).eq("status", "pending"),
-      supabase.from("ads").select("id", { count: "exact", head: true }).eq("status", "active"),
-      supabase.from("site_issues").select("id", { count: "exact", head: true }).neq("status", "resolved"),
+      firestore.getDocs(firestore.query(firestore.collection(db, "ads"), firestore.where("status", "==", "pending"), firestore.limit(50))),
+      firestore.getDocs(firestore.query(firestore.collection(db, "site_issues"), firestore.limit(50))),
+      firestore.getCountFromServer(firestore.query(firestore.collection(db, "ads"), firestore.where("status", "==", "pending"))),
+      firestore.getCountFromServer(firestore.query(firestore.collection(db, "ads"), firestore.where("status", "==", "active"))),
+      firestore.getCountFromServer(firestore.query(firestore.collection(db, "site_issues"), firestore.where("status", "!=", "resolved"))),
     ]);
-    const firstError = adsResult.error ?? issuesResult.error ?? pendingCount.error ?? activeCount.error ?? issueCount.error;
-    if (firstError) throw new Error(firstError.message);
-    const adsWithPhotos = await Promise.all((adsResult.data ?? []).map(async (ad) => {
-      const photo = [...(ad.photos ?? [])].sort((a, b) => a.position - b.position)[0];
-      if (!photo) throw new Error(`Pending listing "${ad.title}" has no photo to review.`);
-      const { data: signedPhoto, error: photoError } = await supabase.storage
-        .from("ad-images")
-        .createSignedUrl(photo.storage_path, 3600);
-      if (photoError) throw new Error(`Could not load a review photo: ${photoError.message}`);
-      return { ...ad, photoUrl: signedPhoto.signedUrl };
-    }));
+    const adsWithPhotos = adsResult.docs.map((snapshot) => {
+      const ad = toAdRow(snapshot.id, snapshot.data());
+      const firstImage = [...(ad.images ?? [])].sort((a, b) => a.position - b.position)[0];
+      if (!firstImage) throw new Error(`Pending listing "${ad.title}" has no photo to review.`);
+      ad.photoUrl = listingImageUrl(firstImage.key);
+      return ad;
+    }).sort((a, b) => a.created_at.localeCompare(b.created_at));
     setAds(adsWithPhotos);
-    setIssues(issuesResult.data ?? []);
+    setIssues(issuesResult.docs.map((snapshot) => ({ id: snapshot.id, ...snapshot.data() }) as IssueRow)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at)));
     setCounts({
-      pendingAds: pendingCount.count ?? 0,
-      activeAds: activeCount.count ?? 0,
-      openIssues: issueCount.count ?? 0,
+      pendingAds: pendingCount.data().count,
+      activeAds: activeCount.data().count,
+      openIssues: issueCount.data().count,
       openReports: 0,
     });
 
     if (currentRole === "admin") {
+      const listUsers = httpsCallable<void, UserRow[]>(getFirebaseFunctions(), "adminListMarketplaceUsers");
       const [reportResult, reportCount, userResult, productResult, categoryResult] = await Promise.all([
-        supabase.from("reports").select("id,reason,details,resolved,created_at,ad:ads(title)").eq("resolved", false).order("created_at", { ascending: false }).limit(50),
-        supabase.from("reports").select("id", { count: "exact", head: true }).eq("resolved", false),
-        supabase.rpc("admin_list_users"),
-        supabase.from("ads")
-          .select("id,title,status,price,condition,created_at,category:categories(name_en),location:locations(name_en),seller:profiles(display_name)")
-          .order("created_at", { ascending: false })
-          .limit(100),
-        supabase.from("categories").select("id,slug,name_en,name_bn,parent_id").order("sort_order").order("name_en"),
+        firestore.getDocs(firestore.query(firestore.collection(db, "reports"), firestore.where("resolved", "==", false), firestore.limit(50))),
+        firestore.getCountFromServer(firestore.query(firestore.collection(db, "reports"), firestore.where("resolved", "==", false))),
+        listUsers(),
+        firestore.getDocs(firestore.query(firestore.collection(db, "ads"), firestore.limit(100))),
+        firestore.getDocs(firestore.query(firestore.collection(db, "categories"), firestore.limit(100))),
       ]);
-      const adminError = reportResult.error ?? reportCount.error ?? userResult.error ?? productResult.error ?? categoryResult.error;
-      if (adminError) throw new Error(adminError.message);
-      setReports(reportResult.data ?? []);
-      setUsers(userResult.data ?? []);
-      setProducts(productResult.data ?? []);
-      setCategories(categoryResult.data ?? []);
-      setCounts((current) => ({ ...current, openReports: reportCount.count ?? 0 }));
+      setReports(reportResult.docs.map((snapshot) => {
+        const value = snapshot.data();
+        return {
+          id: snapshot.id,
+          reason: String(value.reason ?? ""),
+          details: String(value.details ?? ""),
+          resolved: Boolean(value.resolved),
+          created_at: String(value.created_at ?? ""),
+          ad: [{ title: String(value.ad_title ?? "Listing") }],
+        };
+      }).sort((a, b) => b.created_at.localeCompare(a.created_at)));
+      setUsers(userResult.data);
+      setProducts(productResult.docs.map((snapshot) => toAdRow(snapshot.id, snapshot.data())));
+      setCategories(categoryResult.docs.map((snapshot) => {
+        const value = snapshot.data();
+        return {
+          id: snapshot.id,
+          slug: snapshot.id,
+          name_en: String(value.name_en ?? snapshot.id),
+          name_bn: String(value.name_bn ?? ""),
+          parent_id: typeof value.parent_id === "string" ? value.parent_id : null,
+        };
+      }));
+      setCounts((current) => ({ ...current, openReports: reportCount.data().count }));
     } else {
       setReports([]);
       setUsers([]);
@@ -205,18 +287,13 @@ export default function AdminWorkspace({
       setError("");
       try {
         await prepareUserForMarketplace(currentUser);
-        const { data, error: roleError } = await createClient()
-          .from("user_roles")
-          .select("role")
-          .eq("user_id", currentUser.uid)
-          .maybeSingle();
-        if (roleError) throw new Error(roleError.message);
-        if (data?.role !== "admin" && data?.role !== "moderator") {
+        const token = await getIdTokenResult(currentUser, true);
+        const currentRole = token.claims.role;
+        if (currentRole !== "admin" && currentRole !== "moderator") {
           setRole(null);
           setAccessDenied(true);
           return;
         }
-        const currentRole = data.role;
         if (currentRole !== requiredRole) {
           setRole(null);
           setAccessDenied(true);
@@ -248,20 +325,39 @@ export default function AdminWorkspace({
     }
   }
 
+  async function bootstrapFirstAdmin() {
+    if (!user || user.email?.toLowerCase() !== ownerEmail) return;
+    setBootstrapping(true);
+    setError("");
+    try {
+      const bootstrap = httpsCallable<void, { role: string }>(getFirebaseFunctions(), "bootstrapFirstAdmin");
+      await bootstrap();
+      await user.getIdToken(true);
+      setRole("admin");
+      setAccessDenied(false);
+      await loadWorkspace("admin");
+    } catch (caught) {
+      setError(messageForError(caught));
+    } finally {
+      setBootstrapping(false);
+    }
+  }
+
   async function moderateAd(adId: string, status: "active" | "rejected") {
     setBusyId(adId);
     setNotice("");
     setError("");
     try {
-      const { data, error: updateError } = await createClient()
-        .from("ads")
-        .update({ status })
-        .eq("id", adId)
-        .eq("status", "pending")
-        .select("id")
-        .maybeSingle();
-      if (updateError) throw new Error(updateError.message);
-      if (!data) throw new Error("This listing was already reviewed. Refresh the queue and try again.");
+      const firestore = await import("@firebase/firestore");
+      const db = await getFirebaseDb();
+      await firestore.runTransaction(db, async (transaction) => {
+        const adRef = firestore.doc(db, "ads", adId);
+        const ad = await transaction.get(adRef);
+        if (!ad.exists() || ad.data().status !== "pending") {
+          throw new Error("This listing was already reviewed. Refresh the queue and try again.");
+        }
+        transaction.update(adRef, { status, updated_at: new Date().toISOString() });
+      });
       setNotice(status === "active" ? "Listing approved and published." : "Listing rejected and kept private.");
       await refresh();
     } catch (caught) {
@@ -276,14 +372,9 @@ export default function AdminWorkspace({
     setNotice("");
     setError("");
     try {
-      const { data, error: updateError } = await createClient()
-        .from("site_issues")
-        .update({ status, updated_at: new Date().toISOString() })
-        .eq("id", issueId)
-        .select("id")
-        .maybeSingle();
-      if (updateError) throw new Error(updateError.message);
-      if (!data) throw new Error("This issue could not be updated. Refresh and try again.");
+      const firestore = await import("@firebase/firestore");
+      const db = await getFirebaseDb();
+      await firestore.updateDoc(firestore.doc(db, "site_issues", issueId), { status, updated_at: new Date().toISOString() });
       setNotice("Issue status updated.");
       await refresh();
     } catch (caught) {
@@ -302,14 +393,18 @@ export default function AdminWorkspace({
     const form = event.currentTarget;
     const formData = new FormData(form);
     try {
-      const { error: insertError } = await createClient().from("site_issues").insert({
+      const firestore = await import("@firebase/firestore");
+      const db = await getFirebaseDb();
+      await firestore.addDoc(firestore.collection(db, "site_issues"), {
         reporter_id: user.uid,
         title: String(formData.get("title") ?? "").trim(),
         details: String(formData.get("details") ?? "").trim(),
         page_path: String(formData.get("page_path") ?? "/").trim() || "/",
         severity: String(formData.get("severity") ?? "medium"),
+        status: "open",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
       });
-      if (insertError) throw new Error(insertError.message);
       form.reset();
       setNotice("Bug finding submitted to the operations team.");
       await refresh();
@@ -325,15 +420,14 @@ export default function AdminWorkspace({
     setError("");
     setNotice("");
     try {
-      const { data, error: updateError } = await createClient()
-        .from("reports")
-        .update({ resolved: true })
-        .eq("id", reportId)
-        .eq("resolved", false)
-        .select("id")
-        .maybeSingle();
-      if (updateError) throw new Error(updateError.message);
-      if (!data) throw new Error("This report has already been handled.");
+      const firestore = await import("@firebase/firestore");
+      const db = await getFirebaseDb();
+      await firestore.runTransaction(db, async (transaction) => {
+        const reportRef = firestore.doc(db, "reports", reportId);
+        const report = await transaction.get(reportRef);
+        if (!report.exists() || report.data().resolved) throw new Error("This report has already been handled.");
+        transaction.update(reportRef, { resolved: true, updated_at: new Date().toISOString() });
+      });
       setNotice("Report marked as reviewed.");
       await refresh();
     } catch (caught) {
@@ -348,11 +442,14 @@ export default function AdminWorkspace({
     setError("");
     setNotice("");
     try {
-      const { error: rpcError } = await createClient().rpc("admin_set_moderator", {
+      const setModeratorAccess = httpsCallable<
+        { target_user_id: string; enabled: boolean },
+        { role: string }
+      >(getFirebaseFunctions(), "setModeratorAccess");
+      await setModeratorAccess({
         target_user_id: targetUser.user_id,
         enabled: targetUser.role !== "moderator",
       });
-      if (rpcError) throw new Error(rpcError.message);
       setNotice(targetUser.role === "moderator" ? "Moderator access removed." : "Moderator access granted.");
       await refresh();
     } catch (caught) {
@@ -367,15 +464,16 @@ export default function AdminWorkspace({
     setNotice("");
     setError("");
     try {
-      const { data, error: updateError } = await createClient()
-        .from("ads")
-        .update({ status })
-        .eq("id", product.id)
-        .eq("status", product.status)
-        .select("id")
-        .maybeSingle();
-      if (updateError) throw new Error(updateError.message);
-      if (!data) throw new Error("This listing changed. Refresh the products list and try again.");
+      const firestore = await import("@firebase/firestore");
+      const db = await getFirebaseDb();
+      await firestore.runTransaction(db, async (transaction) => {
+        const productRef = firestore.doc(db, "ads", product.id);
+        const current = await transaction.get(productRef);
+        if (!current.exists() || current.data().status !== product.status) {
+          throw new Error("This listing changed. Refresh the products list and try again.");
+        }
+        transaction.update(productRef, { status, updated_at: new Date().toISOString() });
+      });
       setNotice(status === "sold" ? "Listing marked as sold." : "Listing removed from public view.");
       await refresh();
     } catch (caught) {
@@ -392,17 +490,12 @@ export default function AdminWorkspace({
     setNotice("");
     const formData = new FormData(event.currentTarget);
     try {
-      const { data, error: updateError } = await createClient()
-        .from("categories")
-        .update({
-          name_en: String(formData.get("name_en") ?? "").trim(),
-          name_bn: String(formData.get("name_bn") ?? "").trim(),
-        })
-        .eq("id", category.id)
-        .select("id")
-        .maybeSingle();
-      if (updateError) throw new Error(updateError.message);
-      if (!data) throw new Error("Category was not updated. Confirm you have Admin access.");
+      const firestore = await import("@firebase/firestore");
+      const db = await getFirebaseDb();
+      await firestore.updateDoc(firestore.doc(db, "categories", category.id), {
+        name_en: String(formData.get("name_en") ?? "").trim(),
+        name_bn: String(formData.get("name_bn") ?? "").trim(),
+      });
       setNotice("Category names updated.");
       await refresh();
     } catch (caught) {
@@ -421,15 +514,17 @@ export default function AdminWorkspace({
     const formData = new FormData(form);
     try {
       const parentId = String(formData.get("parent_id") ?? "");
-      const { error: insertError } = await createClient().from("categories").insert({
-        slug: String(formData.get("slug") ?? "").trim().toLowerCase(),
+      const slug = String(formData.get("slug") ?? "").trim().toLowerCase();
+      const firestore = await import("@firebase/firestore");
+      const db = await getFirebaseDb();
+      await firestore.setDoc(firestore.doc(db, "categories", slug), {
+        slug,
         name_en: String(formData.get("name_en") ?? "").trim(),
         name_bn: String(formData.get("name_bn") ?? "").trim(),
         parent_id: parentId || null,
         icon: "tag",
         sort_order: 100,
       });
-      if (insertError) throw new Error(insertError.message);
       form.reset();
       setNotice("Category created.");
       await refresh();
@@ -454,10 +549,18 @@ export default function AdminWorkspace({
         <Panel>
           <h1 className="text-xl font-bold text-slate-950">{requiredRole === "admin" ? "Administrator access required" : "Moderator access required"}</h1>
           <p className="mt-3 text-sm leading-6 text-slate-600">
-            {requiredRole === "admin"
-              ? "This private admin console is available only to administrators. Moderators can use the separate moderation page."
-              : "This review workspace is available only to moderators. Administrators can review listings from the admin console."}
+            {requiredRole === "admin" && user?.email?.toLowerCase() === ownerEmail
+              ? "Use the owner account to claim the first administrator role. This one-time action only succeeds if no administrator has been set up."
+              : requiredRole === "admin"
+                ? "This private admin console is available only to administrators. Moderators can use the separate moderation page."
+                : "This review workspace is available only to moderators. Administrators can review listings from the admin console."}
           </p>
+          {requiredRole === "admin" && user?.email?.toLowerCase() === ownerEmail && (
+            <button className="mt-5 min-h-11 rounded-xl bg-emerald-700 px-5 text-sm font-bold text-white disabled:opacity-60" disabled={bootstrapping} onClick={bootstrapFirstAdmin} type="button">
+              {bootstrapping ? "Setting up administrator…" : "Set up first administrator"}
+            </button>
+          )}
+          {error && <p aria-live="assertive" className="mt-4 rounded-xl bg-rose-50 p-3 text-sm leading-6 text-rose-800">{error}</p>}
         </Panel>
       </main>
     );
@@ -544,9 +647,9 @@ export default function AdminWorkspace({
                 <h2 className="text-lg font-bold text-slate-950">System and security overview</h2>
                 <p className="mt-1 text-sm text-slate-600">Operational status based on the latest successful database queries.</p>
                 <dl className="mt-5 grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
-                  <div><dt className="text-slate-500">Marketplace database</dt><dd className="mt-1 font-semibold text-emerald-800">Supabase · connected</dd></div>
+                  <div><dt className="text-slate-500">Marketplace database</dt><dd className="mt-1 font-semibold text-emerald-800">Firebase Firestore · connected</dd></div>
                   <div><dt className="text-slate-500">Sign-in provider</dt><dd className="mt-1 font-semibold text-slate-900">Firebase Auth</dd></div>
-                  <div><dt className="text-slate-500">Authorization</dt><dd className="mt-1 font-semibold text-slate-900">Database Row Level Security</dd></div>
+                  <div><dt className="text-slate-500">Authorization</dt><dd className="mt-1 font-semibold text-slate-900">Firestore security rules and Firebase claims</dd></div>
                   <div><dt className="text-slate-500">Last database check</dt><dd className="mt-1 font-semibold text-slate-900">{connectedAt ? dateFormatter.format(new Date(connectedAt)) : "Checking…"}</dd></div>
                 </dl>
                 <p className="mt-4 rounded-xl bg-amber-50 p-3 text-xs leading-5 text-amber-900">Secret keys, service credentials, and raw security tokens are never displayed in this browser workspace.</p>
@@ -570,12 +673,7 @@ export default function AdminWorkspace({
             {ads.length === 0 ? <EmptyState title="The review queue is clear" text="New submissions will appear here as soon as they are sent for approval." /> : ads.map((ad) => (
               <Panel className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between" key={ad.id}>
                 {ad.photoUrl && (
-                  <div
-                    aria-label={`Photo of ${ad.title}`}
-                    className="aspect-[4/3] w-full shrink-0 rounded-xl bg-slate-100 bg-cover bg-center sm:w-44"
-                    role="img"
-                    style={{ backgroundImage: `url("${ad.photoUrl}")` }}
-                  />
+                  <StaffListingPhoto title={ad.title} url={ad.photoUrl} />
                 )}
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">

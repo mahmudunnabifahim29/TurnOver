@@ -1,10 +1,9 @@
 "use client";
 
-import { onIdTokenChanged, signOut } from "@firebase/auth";
+import { getIdTokenResult, onIdTokenChanged, signOut } from "@firebase/auth";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/client";
-import { createClient } from "@/lib/supabase/client";
 import type { Locale } from "./locale-switcher";
 
 export default function AccountControls({ locale }: { locale: Locale }) {
@@ -23,14 +22,10 @@ export default function AccountControls({ locale }: { locale: Locale }) {
       setAuthError("");
       if (!user) return;
       try {
-        const { data, error } = await createClient()
-          .from("user_roles")
-          .select("role")
-          .eq("user_id", user.uid)
-          .maybeSingle();
-        if (error) throw new Error(error.message);
-        if (active && (data?.role === "admin" || data?.role === "moderator")) {
-          setStaffHref(data.role === "admin" ? "/admin" : "/moderation");
+        const token = await getIdTokenResult(user);
+        const role = token.claims.role;
+        if (active && (role === "admin" || role === "moderator")) {
+          setStaffHref(role === "admin" ? "/admin" : "/moderation");
         }
       } catch (caught) {
         if (active) setAuthError(caught instanceof Error ? caught.message : "Could not check your staff access.");

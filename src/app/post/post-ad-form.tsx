@@ -3,9 +3,9 @@
 import { onAuthStateChanged, type User } from "@firebase/auth";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
-import { getFirebaseAuth, isFirebaseConfigured } from "@/lib/firebase/client";
+import { getFirebaseAuth, getFirebaseDb, isFirebaseConfigured } from "@/lib/firebase/client";
 import { prepareUserForMarketplace } from "@/lib/firebase/prepare-user";
-import { createClient } from "@/lib/supabase/client";
+import { defaultCategories } from "@/lib/categories";
 
 type CategoryOption = { id: string; name_en: string; name_bn: string };
 type LocationOption = { id: string; name_en: string; name_bn: string };
@@ -74,23 +74,26 @@ export default function PostAdForm() {
       setError("");
       try {
         await prepareUserForMarketplace(currentUser);
-        const supabase = createClient();
-        const [categoryResult, locationResult] = await Promise.all([
-          supabase.from("categories")
-            .select("id,name_en,name_bn")
-            .is("parent_id", null)
-            .order("sort_order")
-            .order("name_en"),
-          supabase.from("locations")
-            .select("id,name_en,name_bn")
-            .eq("level", "area")
-            .order("name_en"),
+        const firestore = await import("@firebase/firestore");
+        const db = await getFirebaseDb();
+        const [categoryDocs, locationDocs] = await Promise.all([
+          firestore.getDocs(firestore.collection(db, "categories")),
+          firestore.getDocs(firestore.query(firestore.collection(db, "locations"), firestore.where("level", "==", "area"))),
         ]);
-        if (categoryResult.error) throw new Error(categoryResult.error.message);
-        if (locationResult.error) throw new Error(locationResult.error.message);
+        const categoryOptions = categoryDocs.empty
+          ? defaultCategories.map((category) => ({ id: category.slug, name_en: category.name, name_bn: category.bangla }))
+          : categoryDocs.docs.map((category) => ({
+            id: category.id,
+            name_en: String(category.data().name_en ?? category.id),
+            name_bn: String(category.data().name_bn ?? ""),
+          }));
         if (active) {
-          setCategories(categoryResult.data ?? []);
-          setLocations(locationResult.data ?? []);
+          setCategories(categoryOptions);
+          setLocations(locationDocs.docs.map((location) => ({
+            id: location.id,
+            name_en: String(location.data().name_en ?? location.id),
+            name_bn: String(location.data().name_bn ?? ""),
+          })));
         }
       } catch (caught) {
         if (active) setError(messageForError(caught));
@@ -121,71 +124,93 @@ export default function PostAdForm() {
     setBusy(true);
     setError("");
     setNotice("");
-    const supabase = createClient();
     let adId: string | null = null;
+    let firestore: typeof import("@firebase/firestore") | null = null;
+    let db: import("@firebase/firestore").Firestore | null = null;
     const uploadedPaths: string[] = [];
+    const getIdToken = () => user.getIdToken();
 
     try {
+      firestore = await import("@firebase/firestore");
+      db = await getFirebaseDb();
       const preparedImages: Blob[] = [];
       for (const file of files) preparedImages.push(await optimizeImage(file));
       const newAdId = crypto.randomUUID();
-      const { error: insertError } = await supabase.from("ads").insert({
-        id: newAdId,
+      const selectedCategory = categories.find((category) => category.id === String(formData.get("category_id") ?? ""));
+      const selectedLocation = locations.find((location) => location.id === String(formData.get("location_id") ?? ""));
+      if (!selectedCategory || !selectedLocation) throw new Error("Choose a valid category and neighborhood.");
+      const adRef = firestore.doc(db, "ads", newAdId);
+      await firestore.setDoc(adRef, {
         seller_id: user.uid,
-        category_id: String(formData.get("category_id") ?? ""),
-        location_id: String(formData.get("location_id") ?? ""),
+        seller_display_name: user.displayName || user.email?.split("@")[0] || "Seller",
+        category_id: selectedCategory.id,
+        category_name_en: selectedCategory.name_en,
+        location_id: selectedLocation.id,
+        location_name_en: selectedLocation.name_en,
         title: String(formData.get("title") ?? "").trim(),
         description: String(formData.get("description") ?? "").trim(),
         price: Number(formData.get("price")),
         negotiable: formData.get("negotiable") === "on",
         condition: String(formData.get("condition") ?? "used"),
         status: "draft",
+        images: [],
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
       });
-      if (insertError) throw new Error(insertError.message);
       adId = newAdId;
 
+      const imageRows: { key: string; position: number; alt_text: string }[] = [];
       for (const [position, image] of preparedImages.entries()) {
         const imageId = crypto.randomUUID();
-        const storagePath = `${user.uid}/${newAdId}/${imageId}.webp`;
-        const { error: imageRowError } = await supabase.from("ad_images").insert({
-          id: imageId,
-          ad_id: newAdId,
-          owner_id: user.uid,
-          position,
-          storage_path: storagePath,
-          alt_text: String(formData.get("title") ?? "").trim(),
+        const key = `${user.uid}/${newAdId}/${imageId}.webp`;
+        const response = await fetch(`/api/listing-images/${key.split("/").map(encodeURIComponent).join("/")}`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${await getIdToken()}`,
+            "Content-Type": "image/webp",
+          },
+          body: image,
         });
-        if (imageRowError) throw new Error(imageRowError.message);
-
-        const { error: uploadError } = await supabase.storage
-          .from("ad-images")
-          .upload(storagePath, image, { contentType: "image/webp", upsert: false });
-        if (uploadError) throw new Error(uploadError.message);
-        uploadedPaths.push(storagePath);
+        if (!response.ok) {
+          const result: unknown = await response.json();
+          const message = typeof result === "object" && result !== null && "error" in result && typeof result.error === "string"
+            ? result.error
+            : `Could not upload ${files[position].name}.`;
+          throw new Error(message);
+        }
+        uploadedPaths.push(key);
+        imageRows.push({ key, position, alt_text: String(formData.get("title") ?? "").trim() });
       }
 
-      const { data: submittedAd, error: submitError } = await supabase.from("ads")
-        .update({ status: "pending" })
-        .eq("id", newAdId)
-        .eq("status", "draft")
-        .select("id")
-        .maybeSingle();
-      if (submitError) throw new Error(submitError.message);
-      if (!submittedAd) throw new Error("The draft could not be submitted. Refresh the page and try again.");
+      await firestore.updateDoc(adRef, { images: imageRows, status: "pending", updated_at: new Date().toISOString() });
 
       form.reset();
       setFiles([]);
       setNotice("Your ad is in the review queue. It will become public only after a moderator approves it.");
     } catch (caught) {
       const details = [messageForError(caught)];
-      if (adId) {
-        if (uploadedPaths.length > 0) {
-          const { error: storageCleanupError } = await supabase.storage.from("ad-images").remove(uploadedPaths);
-          if (storageCleanupError) details.push(`Photo cleanup also failed: ${storageCleanupError.message}`);
+      if (adId && db && firestore) {
+        const idToken = await getIdToken();
+        const cleanupResults = await Promise.all(uploadedPaths.map(async (key) => {
+          const response = await fetch(`/api/listing-images/${key.split("/").map(encodeURIComponent).join("/")}`, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${idToken}` },
+          });
+          if (!response.ok) {
+            const result: unknown = await response.json();
+            return typeof result === "object" && result !== null && "error" in result && typeof result.error === "string"
+              ? result.error
+              : `Could not remove ${key}.`;
+          }
+          return null;
+        }));
+        const cleanupError = cleanupResults.find((result): result is string => result !== null);
+        if (cleanupError) {
+          details.push(`Photo cleanup also failed: ${cleanupError}`);
+        } else {
+          await firestore.deleteDoc(firestore.doc(db, "ads", adId));
         }
-        const { error: imageCleanupError } = await supabase.from("ad_images").delete().eq("ad_id", adId);
-        if (imageCleanupError) details.push(`Draft-photo cleanup also failed: ${imageCleanupError.message}`);
-        details.push("A private draft was retained; it was not sent for review.");
+        if (cleanupError) details.push("A private draft was retained; it was not sent for review.");
       }
       setError(details.join(" "));
     } finally {
@@ -198,7 +223,7 @@ export default function PostAdForm() {
       <main className="mx-auto min-h-[65vh] max-w-3xl px-4 py-16 sm:px-6">
         <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           <h1 className="text-xl font-bold text-slate-950">Sign-in setup is not complete</h1>
-          <p className="mt-3 text-sm leading-6 text-slate-600">Connect Firebase and Supabase using the steps in the setup guide before posting a listing.</p>
+          <p className="mt-3 text-sm leading-6 text-slate-600">Connect Firebase and Cloudflare using the steps in the setup guide before posting a listing.</p>
         </section>
       </main>
     );

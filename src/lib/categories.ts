@@ -1,6 +1,3 @@
-import "server-only";
-import { createClient } from "@supabase/supabase-js";
-
 export type MarketplaceCategory = {
   slug: string;
   name: string;
@@ -39,7 +36,7 @@ const iconByKey: Record<string, string> = {
   "book-open": "📚",
 };
 
-const defaultCategories: MarketplaceCategory[] = [
+export const defaultCategories: MarketplaceCategory[] = [
   { slug: "mobiles", name: "Mobiles", bangla: "মোবাইল", ...categoryPresentation.mobiles },
   { slug: "electronics", name: "Electronics", bangla: "ইলেকট্রনিক্স", ...categoryPresentation.electronics },
   { slug: "vehicles", name: "Vehicles", bangla: "যানবাহন", ...categoryPresentation.vehicles },
@@ -54,28 +51,9 @@ const defaultCategories: MarketplaceCategory[] = [
   { slug: "books-education", name: "Books & Education", bangla: "বই ও শিক্ষা", ...categoryPresentation["books-education"] },
 ];
 
-export async function getHomepageCategories(): Promise<MarketplaceCategory[]> {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-  if (!url || !key || url.includes("YOUR_PROJECT_REF") || key === "YOUR_PUBLISHABLE_KEY") {
-    return defaultCategories;
-  }
-
-  const supabase = createClient(url, key, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
-  const { data, error } = await supabase
-    .from("categories")
-    .select("slug,name_en,name_bn,icon")
-    .is("parent_id", null)
-    .order("sort_order")
-    .order("name_en");
-  if (error) throw new Error(`Could not load marketplace categories: ${error.message}`);
-  return data.map((category) => ({
-    slug: category.slug,
-    name: category.name_en,
-    bangla: category.name_bn,
-    icon: categoryPresentation[category.slug]?.icon ?? iconByKey[category.icon] ?? "🏷️",
-    tone: categoryPresentation[category.slug]?.tone ?? "bg-emerald-50",
-  }));
+export function categoryPresentationFor(slug: string, icon = "tag") {
+  return {
+    icon: categoryPresentation[slug]?.icon ?? iconByKey[icon] ?? "🏷️",
+    tone: categoryPresentation[slug]?.tone ?? "bg-emerald-50",
+  };
 }

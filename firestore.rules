@@ -1,0 +1,120 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn() && request.auth.token.role == 'admin';
+    }
+
+    function isStaff() {
+      return signedIn() && request.auth.token.role in ['admin', 'moderator'];
+    }
+
+    function isListingOwner() {
+      return signedIn() && resource.data.seller_id == request.auth.uid;
+    }
+
+    match /ads/{adId} {
+      allow get, list: if resource.data.status == 'active' || isStaff() || isListingOwner();
+
+      allow create: if signedIn()
+        && request.auth.token.email_verified == true
+        && request.resource.data.seller_id == request.auth.uid
+        && request.resource.data.title is string
+        && request.resource.data.title.size() >= 4
+        && request.resource.data.title.size() <= 140
+        && request.resource.data.description is string
+        && request.resource.data.description.size() <= 4000
+        && request.resource.data.price is number
+        && request.resource.data.price >= 0
+        && request.resource.data.negotiable is bool
+        && request.resource.data.status == 'draft'
+        && request.resource.data.images is list
+        && request.resource.data.images.size() == 0
+        && request.resource.data.keys().hasOnly([
+          'seller_id', 'seller_display_name', 'category_id', 'category_name_en',
+          'location_id', 'location_name_en', 'title', 'description', 'price',
+          'negotiable', 'condition', 'status', 'images', 'created_at', 'updated_at'
+        ]);
+
+      allow update: if isAdmin()
+        || (isStaff()
+          && resource.data.status == 'pending'
+          && request.resource.data.status in ['active', 'rejected']
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updated_at']))
+        || (signedIn()
+          && request.auth.token.email_verified == true
+          && resource.data.seller_id == request.auth.uid
+          && resource.data.status == 'draft'
+          && request.resource.data.status == 'pending'
+          && request.resource.data.images is list
+          && request.resource.data.images.size() > 0
+          && request.resource.data.images.size() <= 8
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'images', 'updated_at']));
+
+      allow delete: if isAdmin()
+        || (signedIn() && resource.data.seller_id == request.auth.uid && resource.data.status == 'draft');
+    }
+
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /locations/{locationId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /users/{userId} {
+      allow read, write: if false;
+    }
+
+    match /site_issues/{issueId} {
+      allow read: if isStaff();
+      allow create: if signedIn()
+        && request.resource.data.reporter_id == request.auth.uid
+        && request.resource.data.title is string
+        && request.resource.data.title.size() >= 4
+        && request.resource.data.title.size() <= 140
+        && request.resource.data.details is string
+        && request.resource.data.details.size() >= 10
+        && request.resource.data.details.size() <= 4000
+        && request.resource.data.page_path is string
+        && request.resource.data.page_path.size() <= 500
+        && request.resource.data.severity in ['low', 'medium', 'high', 'critical']
+        && request.resource.data.status == 'open'
+        && request.resource.data.keys().hasOnly([
+          'reporter_id', 'title', 'details', 'page_path', 'severity',
+          'status', 'created_at', 'updated_at'
+        ]);
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updated_at'])
+        && request.resource.data.status in ['in_progress', 'resolved'];
+      allow delete: if isAdmin();
+    }
+
+    match /reports/{reportId} {
+      allow read: if isAdmin();
+      allow create: if signedIn()
+        && request.resource.data.reporter_id == request.auth.uid
+        && request.resource.data.ad_id is string
+        && request.resource.data.reason is string
+        && request.resource.data.reason.size() <= 140
+        && request.resource.data.details is string
+        && request.resource.data.details.size() <= 4000
+        && request.resource.data.resolved == false
+        && request.resource.data.keys().hasOnly([
+          'reporter_id', 'ad_id', 'ad_title', 'reason', 'details',
+          'resolved', 'created_at', 'updated_at'
+        ]);
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['resolved', 'updated_at'])
+        && request.resource.data.resolved == true;
+      allow delete: if isAdmin();
+    }
+  }
+}
